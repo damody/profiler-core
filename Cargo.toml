@@ -1,0 +1,30 @@
+[package]
+name = "profiler-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util"] }
+tokio-stream = "0.1"
+widestring = "1.0"
+parking_lot = "0.12"
+once_cell = "1.19"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1.0"
+regex = "1.10"
+crossbeam-queue = "0.3"
+tokio-util = "0.7"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

@@ -1,0 +1,100 @@
+syntax = "proto3";
+package mprofiler;
+
+message Empty {}
+
+message TopAppInfo {
+  string package_name = 1;
+  string activity = 2;
+  int32 pid = 3;
+}
+
+message GetPidRequest {
+  string package_name = 1;
+}
+
+message GetPidResponse {
+  int32 pid = 1;
+}
+
+message RtbStreamRequest {
+  int32 pid = 1;
+  double interval_secs = 2;
+}
+
+message RtbDataPoint {
+  uint64 timestamp_ms = 1;
+  double fps = 10;
+  double power_mw = 12;
+  double battery_temp_c = 15;
+  double gpu_freq_mhz = 20;
+  double gpu_loading_pct = 21;
+  double bcpu_freq_mhz = 30;
+  double mcpu_freq_mhz = 32;
+  double lcpu_freq_mhz = 34;
+  repeated double cpu_freqs_mhz = 36;
+  repeated double cpu_usages_pct = 37;
+  double total_mips = 40;
+  double dsu_freq_mhz = 50;
+  double dram_freq_mbps = 51;
+  double vcore_v = 52;
+  uint64 wss_kb = 70;
+}
+
+message PerfettoRequest {
+  int32 pid = 1;
+  string mode = 2;
+  int32 duration_secs = 3;
+}
+
+message PerfettoResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message PerfettoStatus {
+  enum State {
+    IDLE = 0;
+    RECORDING = 1;
+    DONE = 3;
+    ERROR = 4;
+  }
+  State state = 1;
+  double progress_pct = 2;
+  string output_path = 3;
+}
+
+message PullFileRequest {
+  string remote_path = 1;
+}
+
+message FileChunk {
+  bytes data = 1;
+  bool is_last = 2;
+}
+
+message StopResponse {
+  bool success = 1;
+  repeated string output_files = 3;
+}
+
+message HealthResponse {
+  string version = 1;
+  string status = 2;
+}
+
+message ShutdownResponse {
+  bool success = 1;
+}
+
+service ProfilerService {
+  rpc Health(Empty) returns (HealthResponse);
+  rpc GetTopApp(Empty) returns (TopAppInfo);
+  rpc GetPid(GetPidRequest) returns (GetPidResponse);
+  rpc StartRtbStream(RtbStreamRequest) returns (stream RtbDataPoint);
+  rpc StartPerfetto(PerfettoRequest) returns (PerfettoResponse);
+  rpc GetPerfettoStatus(Empty) returns (PerfettoStatus);
+  rpc PullFile(PullFileRequest) returns (stream FileChunk);
+  rpc StopRecording(Empty) returns (StopResponse);
+  rpc Shutdown(Empty) returns (ShutdownResponse);
+}
