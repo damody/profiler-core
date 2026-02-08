@@ -87,7 +87,128 @@ message ShutdownResponse {
   bool success = 1;
 }
 
+// ---------------------------------------------------------------------------
+// Package Management
+// ---------------------------------------------------------------------------
+
+message ListPackagesRequest {
+  bool third_party_only = 1;
+}
+
+message PackageInfo {
+  string package_name = 1;
+  string apk_path = 2;
+  string version_name = 3;
+  int32 version_code = 4;
+  int32 pid = 5;
+}
+
+message PackageList {
+  repeated PackageInfo packages = 1;
+}
+
+message PackageRequest {
+  string package_name = 1;
+}
+
+message GenericResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Shell
+// ---------------------------------------------------------------------------
+
+message ShellRequest {
+  string command = 1;
+}
+
+message ShellResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Screen & Input
+// ---------------------------------------------------------------------------
+
+message ScreenSizeResponse {
+  int32 width = 1;
+  int32 height = 2;
+}
+
+message ScreenshotRequest {
+  int32 quality = 1;
+}
+
+message InputTapRequest {
+  int32 x = 1;
+  int32 y = 2;
+}
+
+message InputSwipeRequest {
+  int32 x1 = 1;
+  int32 y1 = 2;
+  int32 x2 = 3;
+  int32 y2 = 4;
+  int32 duration_ms = 5;
+}
+
+message InputTextRequest {
+  string text = 1;
+}
+
+message InputKeyEventRequest {
+  int32 key_code = 1;
+}
+
+// ---------------------------------------------------------------------------
+// File Push (PC → device)
+// ---------------------------------------------------------------------------
+
+message FileUploadChunk {
+  string remote_path = 1;
+  bytes data = 2;
+  bool is_last = 3;
+}
+
+message PushFileResponse {
+  bool success = 1;
+  uint64 bytes_written = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Device Utilities
+// ---------------------------------------------------------------------------
+
+message DevicePropRequest {
+  string prop_name = 1;
+}
+
+message DevicePropResponse {
+  string value = 1;
+}
+
+message PathExistsRequest {
+  string path = 1;
+}
+
+message PathExistsResponse {
+  bool exists = 1;
+}
+
+message InstallApkRequest {
+  string remote_apk_path = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
 service ProfilerService {
+  // Existing RPCs
   rpc Health(Empty) returns (HealthResponse);
   rpc GetTopApp(Empty) returns (TopAppInfo);
   rpc GetPid(GetPidRequest) returns (GetPidResponse);
@@ -97,4 +218,29 @@ service ProfilerService {
   rpc PullFile(PullFileRequest) returns (stream FileChunk);
   rpc StopRecording(Empty) returns (StopResponse);
   rpc Shutdown(Empty) returns (ShutdownResponse);
+
+  // Package Management
+  rpc ListPackages(ListPackagesRequest) returns (PackageList);
+  rpc GetPackageInfo(PackageRequest) returns (PackageInfo);
+  rpc LaunchApp(PackageRequest) returns (GenericResponse);
+  rpc StopApp(PackageRequest) returns (GenericResponse);
+  rpc InstallApk(InstallApkRequest) returns (GenericResponse);
+
+  // Shell
+  rpc Shell(ShellRequest) returns (ShellResponse);
+
+  // Screen & Input
+  rpc GetScreenSize(Empty) returns (ScreenSizeResponse);
+  rpc Screenshot(ScreenshotRequest) returns (stream FileChunk);
+  rpc InputTap(InputTapRequest) returns (GenericResponse);
+  rpc InputSwipe(InputSwipeRequest) returns (GenericResponse);
+  rpc InputText(InputTextRequest) returns (GenericResponse);
+  rpc InputKeyEvent(InputKeyEventRequest) returns (GenericResponse);
+
+  // File Push
+  rpc PushFile(stream FileUploadChunk) returns (PushFileResponse);
+
+  // Device Utilities
+  rpc GetDeviceProp(DevicePropRequest) returns (DevicePropResponse);
+  rpc PathExists(PathExistsRequest) returns (PathExistsResponse);
 }

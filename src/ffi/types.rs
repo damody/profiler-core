@@ -89,6 +89,35 @@ pub struct ProfilerHealthInfo {
     pub status: *mut u16,
 }
 
-/// Progress callback type for file pull operations.
+/// Progress callback type for file pull/push operations.
 pub type ProgressCallback =
     extern "C" fn(bytes_done: u64, total_bytes: u64, user_data: *mut c_void);
+
+// ---------------------------------------------------------------------------
+// New FFI types for gRPC migration
+// ---------------------------------------------------------------------------
+
+/// Package info for a single installed app.
+#[repr(C)]
+pub struct ProfilerPackageInfo {
+    pub package_name: *mut u16,
+    pub apk_path: *mut u16,
+    pub version_name: *mut u16,
+    pub version_code: i32,
+    pub pid: i32,
+}
+
+/// A list of packages returned to C#.
+#[repr(C)]
+pub struct ProfilerPackageList {
+    pub packages: *mut ProfilerPackageInfo,
+    pub count: usize,
+}
+
+/// Shell command result.
+#[repr(C)]
+pub struct ProfilerShellResult {
+    pub exit_code: i32,
+    pub stdout: *mut u16,
+    pub stderr: *mut u16,
+}

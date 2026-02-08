@@ -730,7 +730,7 @@ pub extern "C" fn profiler_stop_recording(serial: *const u16) -> ProfilerResult 
 }
 
 // ---------------------------------------------------------------------------
-// Generic ADB shell
+// Generic ADB shell (legacy — still calls adb.exe directly)
 // ---------------------------------------------------------------------------
 
 /// Execute an arbitrary `adb shell` command and return stdout as a wide string.
@@ -767,4 +767,516 @@ pub extern "C" fn profiler_adb_shell(
 #[no_mangle]
 pub extern "C" fn profiler_free_string(ptr: *mut u16) {
     unsafe { free_wide_ptr(ptr); }
+}
+
+// ===========================================================================
+// New gRPC-backed FFI functions
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Package Management
+// ---------------------------------------------------------------------------
+
+/// Helper: get connection entry and runtime, returns result via closure.
+/// This avoids repeating boilerplate in every FFI function.
+macro_rules! with_connection {
+    ($serial:expr, |$rt:ident, $entry:ident| $body:expr) => {{
+        if $serial.is_null() {
+            return ProfilerResult::InvalidParameter;
+        }
+        let serial_str = unsafe { from_wide_ptr($serial) };
+        let $rt = crate::runtime();
+
+        let mut conns = crate::connections().lock();
+        let $entry = match conns.get_mut(&serial_str) {
+            Some(e) => e,
+            None => return ProfilerResult::DeviceNotFound,
+        };
+
+        $body
+    }};
+}
+
+/// List installed packages.
+#[no_mangle]
+pub extern "C" fn profiler_list_packages(
+    serial: *const u16,
+    third_party_only: bool,
+    out: *mut ProfilerPackageList,
+) -> ProfilerResult {
+    if out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.list_packages(third_party_only)) {
+            Ok(packages) => {
+                let count = packages.len();
+                let mut ffi_packages: Vec<ProfilerPackageInfo> = packages
+                    .iter()
+                    .map(|p| ProfilerPackageInfo {
+                        package_name: to_wide_ptr(&p.package_name),
+                        apk_path: to_wide_ptr(&p.apk_path),
+                        version_name: to_wide_ptr(&p.version_name),
+                        version_code: p.version_code,
+                        pid: p.pid,
+                    })
+                    .collect();
+
+                let pkg_ptr = ffi_packages.as_mut_ptr();
+                std::mem::forget(ffi_packages);
+
+                unsafe {
+                    (*out).packages = pkg_ptr;
+                    (*out).count = count;
+                }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_list_packages: {e:#}");
+                unsafe {
+                    (*out).packages = ptr::null_mut();
+                    (*out).count = 0;
+                }
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Free a package list.
+#[no_mangle]
+pub extern "C" fn profiler_free_package_list(list: *mut ProfilerPackageList) {
+    if list.is_null() {
+        return;
+    }
+    unsafe {
+        let count = (*list).count;
+        let packages_ptr = (*list).packages;
+        if !packages_ptr.is_null() && count > 0 {
+            let packages = Vec::from_raw_parts(packages_ptr, count, count);
+            for p in packages {
+                free_wide_ptr(p.package_name);
+                free_wide_ptr(p.apk_path);
+                free_wide_ptr(p.version_name);
+            }
+        }
+        (*list).packages = ptr::null_mut();
+        (*list).count = 0;
+    }
+}
+
+/// Get detailed info for a single package.
+#[no_mangle]
+pub extern "C" fn profiler_get_package_info(
+    serial: *const u16,
+    package: *const u16,
+    out: *mut ProfilerPackageInfo,
+) -> ProfilerResult {
+    if package.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let package_str = unsafe { from_wide_ptr(package) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.get_package_info(&package_str)) {
+            Ok(info) => {
+                unsafe {
+                    (*out).package_name = to_wide_ptr(&info.package_name);
+                    (*out).apk_path = to_wide_ptr(&info.apk_path);
+                    (*out).version_name = to_wide_ptr(&info.version_name);
+                    (*out).version_code = info.version_code;
+                    (*out).pid = info.pid;
+                }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_get_package_info: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Free a single package info struct.
+#[no_mangle]
+pub extern "C" fn profiler_free_package_info(info: *mut ProfilerPackageInfo) {
+    if info.is_null() {
+        return;
+    }
+    unsafe {
+        free_wide_ptr((*info).package_name);
+        free_wide_ptr((*info).apk_path);
+        free_wide_ptr((*info).version_name);
+        (*info).package_name = ptr::null_mut();
+        (*info).apk_path = ptr::null_mut();
+        (*info).version_name = ptr::null_mut();
+    }
+}
+
+/// Launch an app by package name.
+#[no_mangle]
+pub extern "C" fn profiler_launch_app(
+    serial: *const u16,
+    package: *const u16,
+) -> ProfilerResult {
+    if package.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let package_str = unsafe { from_wide_ptr(package) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.launch_app(&package_str)) {
+            Ok(resp) => {
+                if resp.success { ProfilerResult::Ok } else {
+                    log::error!("profiler_launch_app: {}", resp.message);
+                    ProfilerResult::OperationFailed
+                }
+            }
+            Err(e) => {
+                log::error!("profiler_launch_app: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Force-stop an app.
+#[no_mangle]
+pub extern "C" fn profiler_stop_app(
+    serial: *const u16,
+    package: *const u16,
+) -> ProfilerResult {
+    if package.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let package_str = unsafe { from_wide_ptr(package) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.stop_app(&package_str)) {
+            Ok(resp) => {
+                if resp.success { ProfilerResult::Ok } else {
+                    log::error!("profiler_stop_app: {}", resp.message);
+                    ProfilerResult::OperationFailed
+                }
+            }
+            Err(e) => {
+                log::error!("profiler_stop_app: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Shell (via gRPC daemon)
+// ---------------------------------------------------------------------------
+
+/// Execute a shell command on the device via the gRPC daemon (root).
+#[no_mangle]
+pub extern "C" fn profiler_shell(
+    serial: *const u16,
+    command: *const u16,
+    out: *mut ProfilerShellResult,
+) -> ProfilerResult {
+    if command.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let command_str = unsafe { from_wide_ptr(command) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.shell(&command_str)) {
+            Ok(result) => {
+                unsafe {
+                    (*out).exit_code = result.exit_code;
+                    (*out).stdout = to_wide_ptr(&result.stdout);
+                    (*out).stderr = to_wide_ptr(&result.stderr);
+                }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_shell: {e:#}");
+                unsafe {
+                    (*out).exit_code = -1;
+                    (*out).stdout = ptr::null_mut();
+                    (*out).stderr = ptr::null_mut();
+                }
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Free a shell result.
+#[no_mangle]
+pub extern "C" fn profiler_free_shell_result(result: *mut ProfilerShellResult) {
+    if result.is_null() {
+        return;
+    }
+    unsafe {
+        free_wide_ptr((*result).stdout);
+        free_wide_ptr((*result).stderr);
+        (*result).stdout = ptr::null_mut();
+        (*result).stderr = ptr::null_mut();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Screen & Input
+// ---------------------------------------------------------------------------
+
+/// Get the device screen size.
+#[no_mangle]
+pub extern "C" fn profiler_get_screen_size(
+    serial: *const u16,
+    width_out: *mut i32,
+    height_out: *mut i32,
+) -> ProfilerResult {
+    if width_out.is_null() || height_out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.get_screen_size()) {
+            Ok((w, h)) => {
+                unsafe {
+                    *width_out = w;
+                    *height_out = h;
+                }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_get_screen_size: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Take a screenshot, streaming JPEG bytes to a local file.
+#[no_mangle]
+pub extern "C" fn profiler_screenshot(
+    serial: *const u16,
+    quality: i32,
+    local_path: *const u16,
+    cb: Option<ProgressCallback>,
+    user_data: *mut c_void,
+) -> ProfilerResult {
+    if local_path.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let local_str = unsafe { from_wide_ptr(local_path) };
+    let user_data_val = user_data as usize;
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.screenshot(quality, &local_str, move |done, total| {
+            if let Some(callback) = cb {
+                callback(done, total, user_data_val as *mut c_void);
+            }
+        })) {
+            Ok(()) => ProfilerResult::Ok,
+            Err(e) => {
+                log::error!("profiler_screenshot: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Tap at the given coordinates.
+#[no_mangle]
+pub extern "C" fn profiler_input_tap(
+    serial: *const u16,
+    x: i32,
+    y: i32,
+) -> ProfilerResult {
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.input_tap(x, y)) {
+            Ok(_) => ProfilerResult::Ok,
+            Err(e) => {
+                log::error!("profiler_input_tap: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Swipe between two points.
+#[no_mangle]
+pub extern "C" fn profiler_input_swipe(
+    serial: *const u16,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    duration_ms: i32,
+) -> ProfilerResult {
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.input_swipe(x1, y1, x2, y2, duration_ms)) {
+            Ok(_) => ProfilerResult::Ok,
+            Err(e) => {
+                log::error!("profiler_input_swipe: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Input text on the device.
+#[no_mangle]
+pub extern "C" fn profiler_input_text(
+    serial: *const u16,
+    text: *const u16,
+) -> ProfilerResult {
+    if text.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let text_str = unsafe { from_wide_ptr(text) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.input_text(&text_str)) {
+            Ok(_) => ProfilerResult::Ok,
+            Err(e) => {
+                log::error!("profiler_input_text: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Send a key event.
+#[no_mangle]
+pub extern "C" fn profiler_input_key_event(
+    serial: *const u16,
+    key_code: i32,
+) -> ProfilerResult {
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.input_key_event(key_code)) {
+            Ok(_) => ProfilerResult::Ok,
+            Err(e) => {
+                log::error!("profiler_input_key_event: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// File Push
+// ---------------------------------------------------------------------------
+
+/// Push a local file to the device via gRPC client streaming.
+#[no_mangle]
+pub extern "C" fn profiler_push_file(
+    serial: *const u16,
+    local: *const u16,
+    remote: *const u16,
+    cb: Option<ProgressCallback>,
+    user_data: *mut c_void,
+) -> ProfilerResult {
+    if local.is_null() || remote.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let local_str = unsafe { from_wide_ptr(local) };
+    let remote_str = unsafe { from_wide_ptr(remote) };
+    let user_data_val = user_data as usize;
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.push_file(&local_str, &remote_str, move |done, total| {
+            if let Some(callback) = cb {
+                callback(done, total, user_data_val as *mut c_void);
+            }
+        })) {
+            Ok(_) => ProfilerResult::Ok,
+            Err(e) => {
+                log::error!("profiler_push_file: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Device Utilities
+// ---------------------------------------------------------------------------
+
+/// Get a device property value (e.g. "ro.hardware").
+#[no_mangle]
+pub extern "C" fn profiler_get_device_prop(
+    serial: *const u16,
+    prop: *const u16,
+    out: *mut *mut u16,
+) -> ProfilerResult {
+    if prop.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let prop_str = unsafe { from_wide_ptr(prop) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.get_device_prop(&prop_str)) {
+            Ok(value) => {
+                unsafe { *out = to_wide_ptr(&value); }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_get_device_prop: {e:#}");
+                unsafe { *out = ptr::null_mut(); }
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Check if a path exists on the device.
+#[no_mangle]
+pub extern "C" fn profiler_path_exists(
+    serial: *const u16,
+    path: *const u16,
+    out: *mut bool,
+) -> ProfilerResult {
+    if path.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let path_str = unsafe { from_wide_ptr(path) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.path_exists(&path_str)) {
+            Ok(exists) => {
+                unsafe { *out = exists; }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_path_exists: {e:#}");
+                unsafe { *out = false; }
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Install an APK already on the device.
+#[no_mangle]
+pub extern "C" fn profiler_install_apk(
+    serial: *const u16,
+    remote_apk_path: *const u16,
+) -> ProfilerResult {
+    if remote_apk_path.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let path_str = unsafe { from_wide_ptr(remote_apk_path) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.install_apk(&path_str)) {
+            Ok(resp) => {
+                if resp.success { ProfilerResult::Ok } else {
+                    log::error!("profiler_install_apk: {}", resp.message);
+                    ProfilerResult::OperationFailed
+                }
+            }
+            Err(e) => {
+                log::error!("profiler_install_apk: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
 }
