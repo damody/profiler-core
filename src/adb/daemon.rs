@@ -48,52 +48,68 @@ async fn ensure_root_and_permissive(serial: &str) -> RootMode {
     RootMode::None
 }
 
-/// Deploy the realtime_profile binary to the device and start it as a
-/// background gRPC daemon.
-///
-/// * `local_path` – local binary to push (empty string to skip push)
-/// * `remote_path` – absolute path on device (e.g. `/data/local/tmp/realtime_profile`)
-/// * `grpc_port` – port the daemon will listen on
-pub async fn deploy_and_start(
-    serial: &str,
-    local_path: &str,
-    remote_path: &str,
-    grpc_port: u16,
-) -> Result<()> {
-    // 1. Push the binary (skip if local_path is empty)
-    if !local_path.is_empty() {
-        log::info!("Pushing realtime_profile to {serial}: {local_path} -> {remote_path}");
-        commands::push(serial, local_path, remote_path)
-            .await
-            .context("Failed to push realtime_profile binary")?;
-    }
+/// Push realtime_profile (and libc++_shared.so if present) to the device.
+async fn push_binaries(serial: &str, local_path: &str, remote_path: &str) -> Result<()> {
+    log::info!("Pushing realtime_profile to {serial}: {local_path} -> {remote_path}");
+    commands::push(serial, local_path, remote_path)
+        .await
+        .context("Failed to push realtime_profile binary")?;
 
-    // 2. Make it executable
+    // Also push libc++_shared.so if it exists next to the binary
+    let local = std::path::Path::new(local_path);
+    if let Some(dir) = local.parent() {
+        let so_path = dir.join("libc++_shared.so");
+        if so_path.exists() {
+            let remote_dir = remote_path
+                .rsplit_once('/')
+                .map(|(d, _)| d)
+                .unwrap_or("/data/local/tmp");
+            let remote_so = format!("{remote_dir}/libc++_shared.so");
+            log::info!(
+                "Pushing libc++_shared.so to {serial}: {} -> {remote_so}",
+                so_path.display()
+            );
+            commands::push(serial, &so_path.to_string_lossy(), &remote_so)
+                .await
+                .context("Failed to push libc++_shared.so")?;
+        }
+    }
+    Ok(())
+}
+
+/// Assume the binary is already on-device; chmod, kill old instance, get root,
+/// and start the daemon.
+async fn start_daemon(serial: &str, remote_path: &str, grpc_port: u16) -> Result<()> {
+    // Make it executable
     commands::shell(serial, &format!("chmod +x {remote_path}"))
         .await
         .context("Failed to chmod realtime_profile")?;
 
-    // 3. Kill any existing instance
+    // Kill any existing instance
     let _ = commands::shell(serial, "pkill -f realtime_profile").await;
     sleep(Duration::from_millis(500)).await;
 
-    // 4. Ensure root + SELinux permissive
+    // Ensure root + SELinux permissive
     let root_mode = ensure_root_and_permissive(serial).await;
 
-    // 5. Start in background (with root if available)
+    // Start in background (with root if available)
+    let remote_dir = remote_path
+        .rsplit_once('/')
+        .map(|(d, _)| d)
+        .unwrap_or("/data/local/tmp");
+    let ld_env = format!("LD_LIBRARY_PATH={remote_dir}");
     let daemon_args = format!("{remote_path} --daemon --grpc-port {grpc_port}");
     let start_cmd = match root_mode {
         RootMode::Adb => {
-            // adbd is root — just run directly
-            format!("nohup {daemon_args} > /dev/null 2>&1 &")
+            // adbd is root — env var must precede nohup for shell to parse it
+            format!("{ld_env} nohup {daemon_args} > /dev/null 2>&1 &")
         }
         RootMode::Su => {
-            // Use su -c to launch with root
-            format!("nohup su -c '{daemon_args}' > /dev/null 2>&1 &")
+            // su -c passes string to a shell, so env var assignment works inside quotes
+            format!("nohup su -c '{ld_env} {daemon_args}' > /dev/null 2>&1 &")
         }
         RootMode::None => {
-            // Best effort without root
-            format!("nohup {daemon_args} > /dev/null 2>&1 &")
+            format!("{ld_env} nohup {daemon_args} > /dev/null 2>&1 &")
         }
     };
 
@@ -107,6 +123,44 @@ pub async fn deploy_and_start(
     log::info!(
         "realtime_profile daemon started on {serial}, grpc_port {grpc_port}, root_mode: {root_mode:?}"
     );
+    Ok(())
+}
+
+/// Deploy the realtime_profile binary to the device and start it as a
+/// background gRPC daemon.
+///
+/// Uses an optimistic strategy: first tries to start the daemon without
+/// pushing (assuming a previous binary is still on-device). Only if that
+/// fails does it push the binary and retry.
+///
+/// * `local_path` – local binary to push (empty string to skip push)
+/// * `remote_path` – absolute path on device (e.g. `/data/local/tmp/realtime_profile`)
+/// * `grpc_port` – port the daemon will listen on
+pub async fn deploy_and_start(
+    serial: &str,
+    local_path: &str,
+    remote_path: &str,
+    grpc_port: u16,
+) -> Result<()> {
+    // Phase 1: Optimistic start — try without pushing
+    log::info!("[{serial}] 嘗試直接啟動 daemon（不 push）");
+    if start_daemon(serial, remote_path, grpc_port).await.is_ok() && is_running(serial).await {
+        log::info!("[{serial}] daemon 直接啟動成功，跳過 push");
+        return Ok(());
+    }
+    log::info!("[{serial}] 直接啟動失敗，執行完整部署");
+
+    // Phase 2: Full deploy — push binary then start
+    if local_path.is_empty() {
+        anyhow::bail!("Daemon 啟動失敗且未提供 local binary 路徑");
+    }
+    push_binaries(serial, local_path, remote_path).await?;
+    start_daemon(serial, remote_path, grpc_port).await?;
+
+    if !is_running(serial).await {
+        anyhow::bail!("完整部署後 daemon 仍無法啟動");
+    }
+    log::info!("[{serial}] 完整部署後 daemon 啟動成功");
     Ok(())
 }
 
