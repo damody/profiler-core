@@ -26,25 +26,80 @@ message RtbDataPoint {
   uint64 timestamp_ms = 1;
   double fps = 10;
   double power_mw = 12;
+  double power_ma = 13;
+  double voltage_v = 14;
   double battery_temp_c = 15;
   double gpu_freq_mhz = 20;
   double gpu_loading_pct = 21;
   double bcpu_freq_mhz = 30;
+  double bcpu_usage_pct = 31;
   double mcpu_freq_mhz = 32;
+  double mcpu_usage_pct = 33;
   double lcpu_freq_mhz = 34;
+  double lcpu_usage_pct = 35;
   repeated double cpu_freqs_mhz = 36;
   repeated double cpu_usages_pct = 37;
   double total_mips = 40;
+  double game_mips = 41;
+  double logical_mips = 42;
+  double render_mips = 43;
+  double rhi_mips = 44;
   double dsu_freq_mhz = 50;
   double dram_freq_mbps = 51;
   double vcore_v = 52;
   uint64 wss_kb = 70;
+  uint64 pss_kb = 71;
+  repeated float frame_times_ms = 80;
+  double cpu_time_ms = 90;
+  double gpu_time_ms = 91;
+}
+
+// ---------------------------------------------------------------------------
+// RTB Summary (post-recording statistics)
+// ---------------------------------------------------------------------------
+
+message ThreadSnapshot {
+  int32 tid = 1;
+  int32 tgid = 2;
+  string name = 3;
+  double loading_pct = 4;
+  double c0_pct = 5;
+  double c1_pct = 6;
+  double c2_pct = 7;
+  double runnable_pct = 8;
+  double mips = 9;
+  double mcps = 10;
+  double cpi = 11;
+}
+
+message FreqBucket {
+  uint64 freq_mhz = 1;
+  uint32 count = 2;
+  double percentage = 3;
+}
+
+message FreqDistribution {
+  string component = 1;
+  repeated FreqBucket buckets = 2;
+}
+
+message RtbSummaryRequest {}
+
+message RtbSummary {
+  repeated ThreadSnapshot top_threads = 1;
+  repeated FreqDistribution freq_distributions = 2;
+  ThreadSnapshot logical_thread = 10;
+  ThreadSnapshot render_thread = 11;
+  ThreadSnapshot rhi_thread = 12;
+  double start_temp = 20;
+  double end_temp = 21;
 }
 
 message PerfettoRequest {
   int32 pid = 1;
-  string mode = 2;
+  string mode = 2;           // kept for backward compatibility
   int32 duration_secs = 3;
+  string config_pbtxt = 4;   // when non-empty, overrides mode
 }
 
 message PerfettoResponse {
@@ -204,6 +259,15 @@ message InstallApkRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Temperature
+// ---------------------------------------------------------------------------
+
+message TemperatureResponse {
+  double battery_temp_c = 1;
+  double board_temp_c = 2;
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -217,6 +281,7 @@ service ProfilerService {
   rpc GetPerfettoStatus(Empty) returns (PerfettoStatus);
   rpc PullFile(PullFileRequest) returns (stream FileChunk);
   rpc StopRecording(Empty) returns (StopResponse);
+  rpc GetRtbSummary(RtbSummaryRequest) returns (RtbSummary);
   rpc Shutdown(Empty) returns (ShutdownResponse);
 
   // Package Management
@@ -243,4 +308,7 @@ service ProfilerService {
   // Device Utilities
   rpc GetDeviceProp(DevicePropRequest) returns (DevicePropResponse);
   rpc PathExists(PathExistsRequest) returns (PathExistsResponse);
+
+  // Temperature
+  rpc GetTemperature(Empty) returns (TemperatureResponse);
 }

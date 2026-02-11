@@ -506,25 +506,50 @@ pub extern "C" fn profiler_poll_rtb(handle: u64, out: *mut ProfilerRtbData) -> b
                 (ptr, len)
             };
 
+            // Copy frame_times
+            let (ft_ptr, ft_count) = if dp.frame_times_ms.is_empty() {
+                (ptr::null_mut(), 0)
+            } else {
+                let mut v = dp.frame_times_ms.clone();
+                let ptr = v.as_mut_ptr();
+                let len = v.len();
+                std::mem::forget(v);
+                (ptr, len)
+            };
+
             unsafe {
                 (*out).timestamp_ms = dp.timestamp_ms;
                 (*out).fps = dp.fps;
                 (*out).power_mw = dp.power_mw;
+                (*out).power_ma = dp.power_ma;
+                (*out).voltage_v = dp.voltage_v;
                 (*out).battery_temp_c = dp.battery_temp_c;
                 (*out).gpu_freq_mhz = dp.gpu_freq_mhz;
                 (*out).gpu_loading_pct = dp.gpu_loading_pct;
                 (*out).bcpu_freq_mhz = dp.bcpu_freq_mhz;
+                (*out).bcpu_usage_pct = dp.bcpu_usage_pct;
                 (*out).mcpu_freq_mhz = dp.mcpu_freq_mhz;
+                (*out).mcpu_usage_pct = dp.mcpu_usage_pct;
                 (*out).lcpu_freq_mhz = dp.lcpu_freq_mhz;
+                (*out).lcpu_usage_pct = dp.lcpu_usage_pct;
                 (*out).cpu_freqs_mhz = freqs_ptr;
                 (*out).cpu_freqs_count = freqs_count;
                 (*out).cpu_usages_pct = usages_ptr;
                 (*out).cpu_usages_count = usages_count;
                 (*out).total_mips = dp.total_mips;
+                (*out).game_mips = dp.game_mips;
+                (*out).logical_mips = dp.logical_mips;
+                (*out).render_mips = dp.render_mips;
+                (*out).rhi_mips = dp.rhi_mips;
                 (*out).dsu_freq_mhz = dp.dsu_freq_mhz;
                 (*out).dram_freq_mbps = dp.dram_freq_mbps;
                 (*out).vcore_v = dp.vcore_v;
                 (*out).wss_kb = dp.wss_kb;
+                (*out).pss_kb = dp.pss_kb;
+                (*out).frame_times_ms = ft_ptr;
+                (*out).frame_times_count = ft_count;
+                (*out).cpu_time_ms = dp.cpu_time_ms;
+                (*out).gpu_time_ms = dp.gpu_time_ms;
             }
             true
         }
@@ -566,6 +591,14 @@ pub extern "C" fn profiler_free_rtb_data(data: *mut ProfilerRtbData) {
         }
         (*data).cpu_usages_pct = ptr::null_mut();
         (*data).cpu_usages_count = 0;
+
+        let ft_ptr = (*data).frame_times_ms;
+        let ft_count = (*data).frame_times_count;
+        if !ft_ptr.is_null() && ft_count > 0 {
+            drop(Vec::from_raw_parts(ft_ptr, ft_count, ft_count));
+        }
+        (*data).frame_times_ms = ptr::null_mut();
+        (*data).frame_times_count = 0;
     }
 }
 
@@ -574,18 +607,26 @@ pub extern "C" fn profiler_free_rtb_data(data: *mut ProfilerRtbData) {
 // ---------------------------------------------------------------------------
 
 /// Start a Perfetto trace session.
+///
+/// `config_pbtxt` may be null — when non-null and non-empty it overrides `mode`.
 #[no_mangle]
 pub extern "C" fn profiler_start_perfetto(
     serial: *const u16,
     pid: i32,
     mode: *const u16,
     duration_secs: i32,
+    config_pbtxt: *const u16,
 ) -> ProfilerResult {
     if serial.is_null() || mode.is_null() {
         return ProfilerResult::InvalidParameter;
     }
     let serial_str = unsafe { from_wide_ptr(serial) };
     let mode_str = unsafe { from_wide_ptr(mode) };
+    let pbtxt_str = if config_pbtxt.is_null() {
+        String::new()
+    } else {
+        unsafe { from_wide_ptr(config_pbtxt) }
+    };
     let rt = crate::runtime();
 
     let mut conns = crate::connections().lock();
@@ -594,7 +635,7 @@ pub extern "C" fn profiler_start_perfetto(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_perfetto(pid, &mode_str, duration_secs)) {
+    match rt.block_on(entry.client.start_perfetto(pid, &mode_str, duration_secs, &pbtxt_str)) {
         Ok(resp) => {
             if resp.success {
                 ProfilerResult::Ok
@@ -1252,6 +1293,228 @@ pub extern "C" fn profiler_path_exists(
             }
         }
     })
+}
+
+// ---------------------------------------------------------------------------
+// Temperature
+// ---------------------------------------------------------------------------
+
+/// Get battery and board temperatures from the device.
+#[no_mangle]
+pub extern "C" fn profiler_get_temperature(
+    serial: *const u16,
+    out: *mut ProfilerTemperature,
+) -> ProfilerResult {
+    if out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.get_temperature()) {
+            Ok((battery, board)) => {
+                unsafe {
+                    (*out).battery_temp_c = battery;
+                    (*out).board_temp_c = board;
+                }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_get_temperature: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// RTB Summary
+// ---------------------------------------------------------------------------
+
+/// Helper: convert a proto ThreadSnapshot into an FFI struct.
+fn thread_snapshot_to_ffi(ts: &crate::proto::ThreadSnapshot) -> ProfilerThreadSnapshot {
+    ProfilerThreadSnapshot {
+        tid: ts.tid,
+        tgid: ts.tgid,
+        name: to_wide_ptr(&ts.name),
+        loading_pct: ts.loading_pct,
+        c0_pct: ts.c0_pct,
+        c1_pct: ts.c1_pct,
+        c2_pct: ts.c2_pct,
+        runnable_pct: ts.runnable_pct,
+        mips: ts.mips,
+        mcps: ts.mcps,
+        cpi: ts.cpi,
+    }
+}
+
+/// Helper: create an empty FFI thread snapshot.
+fn empty_thread_snapshot() -> ProfilerThreadSnapshot {
+    ProfilerThreadSnapshot {
+        tid: 0,
+        tgid: 0,
+        name: ptr::null_mut(),
+        loading_pct: 0.0,
+        c0_pct: 0.0,
+        c1_pct: 0.0,
+        c2_pct: 0.0,
+        runnable_pct: 0.0,
+        mips: 0.0,
+        mcps: 0.0,
+        cpi: 0.0,
+    }
+}
+
+/// Get the RTB summary (post-recording statistics).
+#[no_mangle]
+pub extern "C" fn profiler_get_rtb_summary(
+    serial: *const u16,
+    out: *mut ProfilerRtbSummary,
+) -> ProfilerResult {
+    if out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.get_rtb_summary()) {
+            Ok(summary) => {
+                // Convert top_threads
+                let threads_count = summary.top_threads.len();
+                let mut ffi_threads: Vec<ProfilerThreadSnapshot> = summary
+                    .top_threads
+                    .iter()
+                    .map(|ts| thread_snapshot_to_ffi(ts))
+                    .collect();
+                let threads_ptr = if threads_count > 0 {
+                    let p = ffi_threads.as_mut_ptr();
+                    std::mem::forget(ffi_threads);
+                    p
+                } else {
+                    ptr::null_mut()
+                };
+
+                // Convert freq_distributions
+                let dists_count = summary.freq_distributions.len();
+                let mut ffi_dists: Vec<ProfilerFreqDistribution> = summary
+                    .freq_distributions
+                    .iter()
+                    .map(|fd| {
+                        let buckets_count = fd.buckets.len();
+                        let mut ffi_buckets: Vec<ProfilerFreqBucket> = fd
+                            .buckets
+                            .iter()
+                            .map(|b| ProfilerFreqBucket {
+                                freq_mhz: b.freq_mhz,
+                                count: b.count,
+                                percentage: b.percentage,
+                            })
+                            .collect();
+                        let buckets_ptr = if buckets_count > 0 {
+                            let p = ffi_buckets.as_mut_ptr();
+                            std::mem::forget(ffi_buckets);
+                            p
+                        } else {
+                            ptr::null_mut()
+                        };
+                        ProfilerFreqDistribution {
+                            component: to_wide_ptr(&fd.component),
+                            buckets: buckets_ptr,
+                            buckets_count,
+                        }
+                    })
+                    .collect();
+                let dists_ptr = if dists_count > 0 {
+                    let p = ffi_dists.as_mut_ptr();
+                    std::mem::forget(ffi_dists);
+                    p
+                } else {
+                    ptr::null_mut()
+                };
+
+                let logical = summary
+                    .logical_thread
+                    .as_ref()
+                    .map(|ts| thread_snapshot_to_ffi(ts))
+                    .unwrap_or_else(empty_thread_snapshot);
+                let render = summary
+                    .render_thread
+                    .as_ref()
+                    .map(|ts| thread_snapshot_to_ffi(ts))
+                    .unwrap_or_else(empty_thread_snapshot);
+                let rhi = summary
+                    .rhi_thread
+                    .as_ref()
+                    .map(|ts| thread_snapshot_to_ffi(ts))
+                    .unwrap_or_else(empty_thread_snapshot);
+
+                unsafe {
+                    (*out).top_threads = threads_ptr;
+                    (*out).top_threads_count = threads_count;
+                    (*out).freq_distributions = dists_ptr;
+                    (*out).freq_distributions_count = dists_count;
+                    (*out).logical_thread = logical;
+                    (*out).render_thread = render;
+                    (*out).rhi_thread = rhi;
+                    (*out).start_temp = summary.start_temp;
+                    (*out).end_temp = summary.end_temp;
+                }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_get_rtb_summary: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Free a thread snapshot's name string.
+unsafe fn free_thread_snapshot(ts: &mut ProfilerThreadSnapshot) {
+    free_wide_ptr(ts.name);
+    ts.name = ptr::null_mut();
+}
+
+/// Free an RTB summary returned by `profiler_get_rtb_summary`.
+#[no_mangle]
+pub extern "C" fn profiler_free_rtb_summary(summary: *mut ProfilerRtbSummary) {
+    if summary.is_null() {
+        return;
+    }
+    unsafe {
+        // Free top_threads
+        let threads_ptr = (*summary).top_threads;
+        let threads_count = (*summary).top_threads_count;
+        if !threads_ptr.is_null() && threads_count > 0 {
+            let mut threads = Vec::from_raw_parts(threads_ptr, threads_count, threads_count);
+            for ts in threads.iter_mut() {
+                free_thread_snapshot(ts);
+            }
+        }
+        (*summary).top_threads = ptr::null_mut();
+        (*summary).top_threads_count = 0;
+
+        // Free freq_distributions
+        let dists_ptr = (*summary).freq_distributions;
+        let dists_count = (*summary).freq_distributions_count;
+        if !dists_ptr.is_null() && dists_count > 0 {
+            let mut dists = Vec::from_raw_parts(dists_ptr, dists_count, dists_count);
+            for fd in dists.iter_mut() {
+                free_wide_ptr(fd.component);
+                fd.component = ptr::null_mut();
+                if !fd.buckets.is_null() && fd.buckets_count > 0 {
+                    drop(Vec::from_raw_parts(fd.buckets, fd.buckets_count, fd.buckets_count));
+                }
+                fd.buckets = ptr::null_mut();
+                fd.buckets_count = 0;
+            }
+        }
+        (*summary).freq_distributions = ptr::null_mut();
+        (*summary).freq_distributions_count = 0;
+
+        // Free game task thread snapshots
+        free_thread_snapshot(&mut (*summary).logical_thread);
+        free_thread_snapshot(&mut (*summary).render_thread);
+        free_thread_snapshot(&mut (*summary).rhi_thread);
+    }
 }
 
 /// Install an APK already on the device.

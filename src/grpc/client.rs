@@ -7,7 +7,8 @@ use crate::proto::{
     DevicePropRequest, Empty, FileUploadChunk, GetPidRequest, InputKeyEventRequest,
     InputSwipeRequest, InputTapRequest, InputTextRequest, InstallApkRequest,
     ListPackagesRequest, PackageRequest, PathExistsRequest, PerfettoRequest, PerfettoResponse,
-    PullFileRequest, RtbStreamRequest, ScreenshotRequest, ShellRequest, StopResponse,
+    PullFileRequest, RtbStreamRequest, RtbSummaryRequest, ScreenshotRequest, ShellRequest,
+    StopResponse,
 };
 
 /// High-level wrapper around the gRPC ProfilerServiceClient.
@@ -127,6 +128,7 @@ impl ProfilerClient {
         pid: i32,
         mode: &str,
         duration_secs: i32,
+        config_pbtxt: &str,
     ) -> Result<PerfettoResponse> {
         let resp = self
             .inner
@@ -134,6 +136,7 @@ impl ProfilerClient {
                 pid,
                 mode: mode.to_string(),
                 duration_secs,
+                config_pbtxt: config_pbtxt.to_string(),
             })
             .await
             .context("StartPerfetto RPC failed")?
@@ -574,5 +577,31 @@ impl ProfilerClient {
             .into_inner();
 
         Ok(resp.exists)
+    }
+
+    /// Get battery and board temperatures from the device.
+    pub async fn get_temperature(&mut self) -> Result<(f64, f64)> {
+        let resp = self
+            .inner
+            .get_temperature(Empty {})
+            .await
+            .context("GetTemperature RPC failed")?
+            .into_inner();
+        Ok((resp.battery_temp_c, resp.board_temp_c))
+    }
+
+    // =========================================================================
+    // RTB Summary
+    // =========================================================================
+
+    /// Get the RTB summary (post-recording statistics).
+    pub async fn get_rtb_summary(&mut self) -> Result<crate::proto::RtbSummary> {
+        let resp = self
+            .inner
+            .get_rtb_summary(RtbSummaryRequest {})
+            .await
+            .context("GetRtbSummary RPC failed")?
+            .into_inner();
+        Ok(resp)
     }
 }

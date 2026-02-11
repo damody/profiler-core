@@ -50,12 +50,17 @@ pub struct ProfilerRtbData {
     pub timestamp_ms: u64,
     pub fps: f64,
     pub power_mw: f64,
+    pub power_ma: f64,
+    pub voltage_v: f64,
     pub battery_temp_c: f64,
     pub gpu_freq_mhz: f64,
     pub gpu_loading_pct: f64,
     pub bcpu_freq_mhz: f64,
+    pub bcpu_usage_pct: f64,
     pub mcpu_freq_mhz: f64,
+    pub mcpu_usage_pct: f64,
     pub lcpu_freq_mhz: f64,
+    pub lcpu_usage_pct: f64,
     /// Per-core CPU frequencies.
     pub cpu_freqs_mhz: *mut f64,
     pub cpu_freqs_count: usize,
@@ -63,10 +68,20 @@ pub struct ProfilerRtbData {
     pub cpu_usages_pct: *mut f64,
     pub cpu_usages_count: usize,
     pub total_mips: f64,
+    pub game_mips: f64,
+    pub logical_mips: f64,
+    pub render_mips: f64,
+    pub rhi_mips: f64,
     pub dsu_freq_mhz: f64,
     pub dram_freq_mbps: f64,
     pub vcore_v: f64,
     pub wss_kb: u64,
+    pub pss_kb: u64,
+    /// Frame times collected during this interval.
+    pub frame_times_ms: *mut f32,
+    pub frame_times_count: usize,
+    pub cpu_time_ms: f64,
+    pub gpu_time_ms: f64,
 }
 
 /// Status of a Perfetto trace session.
@@ -120,4 +135,61 @@ pub struct ProfilerShellResult {
     pub exit_code: i32,
     pub stdout: *mut u16,
     pub stderr: *mut u16,
+}
+
+/// Temperature reading from the device.
+#[repr(C)]
+pub struct ProfilerTemperature {
+    pub battery_temp_c: f64,
+    pub board_temp_c: f64,
+}
+
+// ---------------------------------------------------------------------------
+// RTB Summary types
+// ---------------------------------------------------------------------------
+
+/// A single thread snapshot from RTB summary.
+#[repr(C)]
+pub struct ProfilerThreadSnapshot {
+    pub tid: i32,
+    pub tgid: i32,
+    pub name: *mut u16,
+    pub loading_pct: f64,
+    pub c0_pct: f64,
+    pub c1_pct: f64,
+    pub c2_pct: f64,
+    pub runnable_pct: f64,
+    pub mips: f64,
+    pub mcps: f64,
+    pub cpi: f64,
+}
+
+/// A single frequency bucket in a distribution.
+#[repr(C)]
+pub struct ProfilerFreqBucket {
+    pub freq_mhz: u64,
+    pub count: u32,
+    pub percentage: f64,
+}
+
+/// A frequency distribution for a component (e.g. "C0", "GPU", "DSU").
+#[repr(C)]
+pub struct ProfilerFreqDistribution {
+    pub component: *mut u16,
+    pub buckets: *mut ProfilerFreqBucket,
+    pub buckets_count: usize,
+}
+
+/// RTB summary containing post-recording statistics.
+#[repr(C)]
+pub struct ProfilerRtbSummary {
+    pub top_threads: *mut ProfilerThreadSnapshot,
+    pub top_threads_count: usize,
+    pub freq_distributions: *mut ProfilerFreqDistribution,
+    pub freq_distributions_count: usize,
+    pub logical_thread: ProfilerThreadSnapshot,
+    pub render_thread: ProfilerThreadSnapshot,
+    pub rhi_thread: ProfilerThreadSnapshot,
+    pub start_temp: f64,
+    pub end_temp: f64,
 }
