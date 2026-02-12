@@ -1558,3 +1558,240 @@ pub extern "C" fn profiler_install_apk(
         }
     })
 }
+
+// ---------------------------------------------------------------------------
+// Surface Names
+// ---------------------------------------------------------------------------
+
+/// Get SurfaceFlinger surface names matching a package.
+///
+/// Returns a newline-joined UTF-16 string.  Caller must free with `profiler_free_string`.
+#[no_mangle]
+pub extern "C" fn profiler_get_surface_names(
+    serial: *const u16,
+    package_name: *const u16,
+    out: *mut *mut u16,
+) -> ProfilerResult {
+    if package_name.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let package_str = unsafe { from_wide_ptr(package_name) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.get_surface_names(&package_str)) {
+            Ok(names) => {
+                let joined = names.join("\n");
+                unsafe { *out = to_wide_ptr(&joined); }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_get_surface_names: {e:#}");
+                unsafe { *out = ptr::null_mut(); }
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Charging Control
+// ---------------------------------------------------------------------------
+
+/// Enable or disable charging on the device.
+#[no_mangle]
+pub extern "C" fn profiler_set_charging(
+    serial: *const u16,
+    enable: bool,
+) -> ProfilerResult {
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.set_charging(enable)) {
+            Ok(resp) => {
+                if resp.success { ProfilerResult::Ok } else {
+                    log::error!("profiler_set_charging: {}", resp.message);
+                    ProfilerResult::OperationFailed
+                }
+            }
+            Err(e) => {
+                log::error!("profiler_set_charging: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// File Operations
+// ---------------------------------------------------------------------------
+
+/// Remove a file on the device.
+#[no_mangle]
+pub extern "C" fn profiler_remove_file(
+    serial: *const u16,
+    path: *const u16,
+) -> ProfilerResult {
+    if path.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let path_str = unsafe { from_wide_ptr(path) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.remove_file(&path_str)) {
+            Ok(resp) => {
+                if resp.success { ProfilerResult::Ok } else {
+                    log::error!("profiler_remove_file: {}", resp.message);
+                    ProfilerResult::OperationFailed
+                }
+            }
+            Err(e) => {
+                log::error!("profiler_remove_file: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Create a tar.gz archive on the device.
+#[no_mangle]
+pub extern "C" fn profiler_create_archive(
+    serial: *const u16,
+    working_directory: *const u16,
+    target: *const u16,
+    output_path: *const u16,
+) -> ProfilerResult {
+    if working_directory.is_null() || target.is_null() || output_path.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let dir_str = unsafe { from_wide_ptr(working_directory) };
+    let target_str = unsafe { from_wide_ptr(target) };
+    let output_str = unsafe { from_wide_ptr(output_path) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.create_archive(&dir_str, &target_str, &output_str)) {
+            Ok(resp) => {
+                if resp.success { ProfilerResult::Ok } else {
+                    log::error!("profiler_create_archive: {}", resp.message);
+                    ProfilerResult::OperationFailed
+                }
+            }
+            Err(e) => {
+                log::error!("profiler_create_archive: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Extract a tar.gz archive on the device.
+#[no_mangle]
+pub extern "C" fn profiler_extract_archive(
+    serial: *const u16,
+    working_directory: *const u16,
+    archive_path: *const u16,
+) -> ProfilerResult {
+    if working_directory.is_null() || archive_path.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let dir_str = unsafe { from_wide_ptr(working_directory) };
+    let archive_str = unsafe { from_wide_ptr(archive_path) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.extract_archive(&dir_str, &archive_str)) {
+            Ok(resp) => {
+                if resp.success { ProfilerResult::Ok } else {
+                    log::error!("profiler_extract_archive: {}", resp.message);
+                    ProfilerResult::OperationFailed
+                }
+            }
+            Err(e) => {
+                log::error!("profiler_extract_archive: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Change file permissions on the device.
+#[no_mangle]
+pub extern "C" fn profiler_chmod(
+    serial: *const u16,
+    path: *const u16,
+    mode: *const u16,
+    recursive: bool,
+) -> ProfilerResult {
+    if path.is_null() || mode.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let path_str = unsafe { from_wide_ptr(path) };
+    let mode_str = unsafe { from_wide_ptr(mode) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.chmod(&path_str, &mode_str, recursive)) {
+            Ok(resp) => {
+                if resp.success { ProfilerResult::Ok } else {
+                    log::error!("profiler_chmod: {}", resp.message);
+                    ProfilerResult::OperationFailed
+                }
+            }
+            Err(e) => {
+                log::error!("profiler_chmod: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Change file ownership on the device.
+#[no_mangle]
+pub extern "C" fn profiler_chown(
+    serial: *const u16,
+    path: *const u16,
+    uid: i32,
+    gid: i32,
+    recursive: bool,
+) -> ProfilerResult {
+    if path.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let path_str = unsafe { from_wide_ptr(path) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.chown(&path_str, uid, gid, recursive)) {
+            Ok(resp) => {
+                if resp.success { ProfilerResult::Ok } else {
+                    log::error!("profiler_chown: {}", resp.message);
+                    ProfilerResult::OperationFailed
+                }
+            }
+            Err(e) => {
+                log::error!("profiler_chown: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Get the UID owner of a file on the device.
+#[no_mangle]
+pub extern "C" fn profiler_get_file_owner(
+    serial: *const u16,
+    path: *const u16,
+    uid_out: *mut i32,
+) -> ProfilerResult {
+    if path.is_null() || uid_out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let path_str = unsafe { from_wide_ptr(path) };
+
+    with_connection!(serial, |rt, entry| {
+        match rt.block_on(entry.client.get_file_owner(&path_str)) {
+            Ok(uid) => {
+                unsafe { *uid_out = uid; }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_get_file_owner: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}

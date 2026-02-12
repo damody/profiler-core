@@ -4,11 +4,12 @@ use tonic::transport::Channel;
 
 use crate::proto::profiler_service_client::ProfilerServiceClient;
 use crate::proto::{
-    DevicePropRequest, Empty, FileUploadChunk, GetPidRequest, InputKeyEventRequest,
-    InputSwipeRequest, InputTapRequest, InputTextRequest, InstallApkRequest,
-    ListPackagesRequest, PackageRequest, PathExistsRequest, PerfettoRequest, PerfettoResponse,
-    PullFileRequest, RtbStreamRequest, RtbSummaryRequest, ScreenshotRequest, ShellRequest,
-    StopResponse,
+    ChmodRequest, ChownRequest, CreateArchiveRequest, DevicePropRequest, Empty,
+    ExtractArchiveRequest, FileUploadChunk, GetFileOwnerRequest, GetPidRequest,
+    GetSurfaceNamesRequest, InputKeyEventRequest, InputSwipeRequest, InputTapRequest,
+    InputTextRequest, InstallApkRequest, ListPackagesRequest, PackageRequest, PathExistsRequest,
+    PerfettoRequest, PerfettoResponse, PullFileRequest, RemoveFileRequest, RtbStreamRequest,
+    RtbSummaryRequest, ScreenshotRequest, SetChargingRequest, ShellRequest, StopResponse,
 };
 
 /// High-level wrapper around the gRPC ProfilerServiceClient.
@@ -605,5 +606,154 @@ impl ProfilerClient {
             .context("GetRtbSummary RPC failed")?
             .into_inner();
         Ok(resp)
+    }
+
+    // =========================================================================
+    // Surface Names
+    // =========================================================================
+
+    /// Get SurfaceFlinger surface names matching a package.
+    pub async fn get_surface_names(&mut self, package_name: &str) -> Result<Vec<String>> {
+        let resp = self
+            .inner
+            .get_surface_names(GetSurfaceNamesRequest {
+                package_name: package_name.to_string(),
+            })
+            .await
+            .context("GetSurfaceNames RPC failed")?
+            .into_inner();
+        Ok(resp.surface_names)
+    }
+
+    // =========================================================================
+    // Charging Control
+    // =========================================================================
+
+    /// Enable or disable charging.
+    pub async fn set_charging(&mut self, enable: bool) -> Result<GenericResult> {
+        let resp = self
+            .inner
+            .set_charging(SetChargingRequest { enable })
+            .await
+            .context("SetCharging RPC failed")?
+            .into_inner();
+        Ok(GenericResult {
+            success: resp.success,
+            message: resp.message,
+        })
+    }
+
+    // =========================================================================
+    // File Operations
+    // =========================================================================
+
+    /// Remove a file on the device.
+    pub async fn remove_file(&mut self, path: &str) -> Result<GenericResult> {
+        let resp = self
+            .inner
+            .remove_file(RemoveFileRequest {
+                path: path.to_string(),
+            })
+            .await
+            .context("RemoveFile RPC failed")?
+            .into_inner();
+        Ok(GenericResult {
+            success: resp.success,
+            message: resp.message,
+        })
+    }
+
+    /// Create a tar.gz archive on the device.
+    pub async fn create_archive(
+        &mut self,
+        working_directory: &str,
+        target: &str,
+        output_path: &str,
+    ) -> Result<GenericResult> {
+        let resp = self
+            .inner
+            .create_archive(CreateArchiveRequest {
+                working_directory: working_directory.to_string(),
+                target: target.to_string(),
+                output_path: output_path.to_string(),
+            })
+            .await
+            .context("CreateArchive RPC failed")?
+            .into_inner();
+        Ok(GenericResult {
+            success: resp.success,
+            message: resp.message,
+        })
+    }
+
+    /// Extract a tar.gz archive on the device.
+    pub async fn extract_archive(
+        &mut self,
+        working_directory: &str,
+        archive_path: &str,
+    ) -> Result<GenericResult> {
+        let resp = self
+            .inner
+            .extract_archive(ExtractArchiveRequest {
+                working_directory: working_directory.to_string(),
+                archive_path: archive_path.to_string(),
+            })
+            .await
+            .context("ExtractArchive RPC failed")?
+            .into_inner();
+        Ok(GenericResult {
+            success: resp.success,
+            message: resp.message,
+        })
+    }
+
+    /// Change file permissions on the device.
+    pub async fn chmod(&mut self, path: &str, mode: &str, recursive: bool) -> Result<GenericResult> {
+        let resp = self
+            .inner
+            .chmod(ChmodRequest {
+                path: path.to_string(),
+                mode: mode.to_string(),
+                recursive,
+            })
+            .await
+            .context("Chmod RPC failed")?
+            .into_inner();
+        Ok(GenericResult {
+            success: resp.success,
+            message: resp.message,
+        })
+    }
+
+    /// Change file ownership on the device.
+    pub async fn chown(&mut self, path: &str, uid: i32, gid: i32, recursive: bool) -> Result<GenericResult> {
+        let resp = self
+            .inner
+            .chown(ChownRequest {
+                path: path.to_string(),
+                uid,
+                gid,
+                recursive,
+            })
+            .await
+            .context("Chown RPC failed")?
+            .into_inner();
+        Ok(GenericResult {
+            success: resp.success,
+            message: resp.message,
+        })
+    }
+
+    /// Get the UID owner of a file on the device.
+    pub async fn get_file_owner(&mut self, path: &str) -> Result<i32> {
+        let resp = self
+            .inner
+            .get_file_owner(GetFileOwnerRequest {
+                path: path.to_string(),
+            })
+            .await
+            .context("GetFileOwner RPC failed")?
+            .into_inner();
+        Ok(resp.uid)
     }
 }
