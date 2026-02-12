@@ -589,6 +589,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mprofiler-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -728,6 +737,7 @@ dependencies = [
  "crossbeam-queue",
  "env_logger",
  "log",
+ "mprofiler-proto",
  "once_cell",
  "parking_lot",
  "prost",
@@ -736,7 +746,6 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic",
- "tonic-build",
  "widestring",
 ]
 

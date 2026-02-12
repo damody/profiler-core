@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::proto::RtbDataPoint;
+use crate::proto::CrDataPoint;
 
 /// A handle to an active RTB gRPC stream.
 ///
@@ -97,5 +98,90 @@ impl RtbStreamHandle {
         self.cancel.cancel();
         // The JoinHandle is dropped, which is fine – the task will
         // notice the cancellation token and exit.
+    }
+}
+
+/// A handle to an active CR (Cache Report) gRPC stream.
+///
+/// Data points are pushed into a bounded lock-free queue by a background
+/// tokio task.  The FFI layer polls the queue non-blocking.
+pub struct CrStreamHandle {
+    queue: Arc<ArrayQueue<CrDataPoint>>,
+    cancel: CancellationToken,
+    _task: JoinHandle<()>,
+}
+
+impl CrStreamHandle {
+    /// Spawn a background task that reads from the gRPC stream and pushes
+    /// data points into the internal queue.
+    pub fn start(
+        rt: &Runtime,
+        mut stream: tonic::Streaming<CrDataPoint>,
+        capacity: usize,
+    ) -> Self {
+        let queue = Arc::new(ArrayQueue::new(capacity));
+        let cancel = CancellationToken::new();
+
+        let q = queue.clone();
+        let ct = cancel.clone();
+        let count = Arc::new(AtomicU64::new(0));
+        let cnt = count.clone();
+
+        let task = rt.spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = ct.cancelled() => {
+                        log::info!("CR stream cancelled");
+                        break;
+                    }
+                    result = stream.message() => {
+                        match result {
+                            Ok(Some(dp)) => {
+                                let n = cnt.fetch_add(1, Ordering::Relaxed);
+                                if n < 3 {
+                                    log::info!(
+                                        "CR recv #{}: ts={} cpus={}",
+                                        n, dp.timestamp_ms, dp.cpus.len()
+                                    );
+                                }
+
+                                match q.push(dp) {
+                                    Ok(()) => {}
+                                    Err(rejected) => {
+                                        let _ = q.pop();
+                                        let _ = q.push(rejected);
+                                        log::trace!("CR queue full, dropped oldest sample");
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                log::info!("CR stream ended (server closed)");
+                                break;
+                            }
+                            Err(e) => {
+                                log::error!("CR stream error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            queue,
+            cancel,
+            _task: task,
+        }
+    }
+
+    /// Non-blocking poll: returns the next data point if available.
+    pub fn poll(&self) -> Option<CrDataPoint> {
+        self.queue.pop()
+    }
+
+    /// Cancel the background stream task.
+    pub fn cancel(self) {
+        self.cancel.cancel();
     }
 }

@@ -183,6 +183,45 @@ pub struct ProfilerFreqDistribution {
     pub buckets_count: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Cache Report (CR) types
+// ---------------------------------------------------------------------------
+
+/// Per-CPU cache report metrics.
+#[repr(C)]
+pub struct ProfilerCrCpuMetrics {
+    pub cpu_num: i32,
+    pub cpu_freq_mhz: f64,
+    pub cpu_usage_pct: f64,
+    pub mips: f64,
+    pub mcps: f64,
+    pub cpi: f64,
+    pub execution_mcps: f64,
+    pub stall_ratio_pct: f64,
+    pub be_stall_ratio_pct: f64,
+    pub fe_stall_ratio_pct: f64,
+    pub stall_mcps: f64,
+    pub l1d_refill_ratio_pct: f64,
+    pub l2d_refill_ratio_pct: f64,
+    pub l3d_refill_ratio_pct: f64,
+    pub llc_read_hit_ratio_pct: f64,
+    pub l1d_mpki: f64,
+    pub l2d_mpki: f64,
+    pub l3d_mpki: f64,
+    pub branch_mpki: f64,
+    pub dtlb_mpki: f64,
+    pub itlb_mpki: f64,
+    pub branch_miss_rate_pct: f64,
+}
+
+/// A single cache report data point (one timestamp, multiple CPUs).
+#[repr(C)]
+pub struct ProfilerCrData {
+    pub timestamp_ms: u64,
+    pub cpus: *mut ProfilerCrCpuMetrics,
+    pub cpus_count: usize,
+}
+
 /// RTB summary containing post-recording statistics.
 #[repr(C)]
 pub struct ProfilerRtbSummary {

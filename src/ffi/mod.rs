@@ -1795,3 +1795,147 @@ pub extern "C" fn profiler_get_file_owner(
         }
     })
 }
+
+// ---------------------------------------------------------------------------
+// Cache Report (CR) streaming
+// ---------------------------------------------------------------------------
+
+/// Start a Cache Report stream.
+///
+/// On success, `handle_out` receives an opaque handle id.  Use
+/// `profiler_poll_cr` to read data and `profiler_stop_cr` to stop.
+#[no_mangle]
+pub extern "C" fn profiler_start_cr(
+    serial: *const u16,
+    interval_secs: f64,
+    cpus: *const i32,
+    cpus_count: usize,
+    exclude_kernel: bool,
+    handle_out: *mut u64,
+) -> ProfilerResult {
+    if serial.is_null() || handle_out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let cpus_slice: &[i32] = if cpus.is_null() || cpus_count == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(cpus, cpus_count) }
+    };
+    let rt = crate::runtime();
+
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+
+    match rt.block_on(entry.client.start_cr_stream(interval_secs, cpus_slice, exclude_kernel)) {
+        Ok(stream) => {
+            let handle_id = crate::next_cr_handle_id();
+            let handle = grpc::streaming::CrStreamHandle::start(rt, stream, 512);
+            crate::cr_handles().lock().insert(handle_id, handle);
+            unsafe { *handle_out = handle_id; }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            log::error!("profiler_start_cr: {e:#}");
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Non-blocking poll for the next CR data point.
+///
+/// Returns `true` if data was available and `out` was populated.
+/// Returns `false` if no data is available yet (caller should try again).
+#[no_mangle]
+pub extern "C" fn profiler_poll_cr(handle: u64, out: *mut ProfilerCrData) -> bool {
+    if out.is_null() {
+        return false;
+    }
+
+    let handles = crate::cr_handles().lock();
+    let h = match handles.get(&handle) {
+        Some(h) => h,
+        None => return false,
+    };
+
+    match h.poll() {
+        Some(dp) => {
+            let cpus_count = dp.cpus.len();
+            let cpus_ptr = if cpus_count > 0 {
+                let mut ffi_cpus: Vec<ProfilerCrCpuMetrics> = dp
+                    .cpus
+                    .iter()
+                    .map(|c| ProfilerCrCpuMetrics {
+                        cpu_num: c.cpu_num,
+                        cpu_freq_mhz: c.cpu_freq_mhz,
+                        cpu_usage_pct: c.cpu_usage_pct,
+                        mips: c.mips,
+                        mcps: c.mcps,
+                        cpi: c.cpi,
+                        execution_mcps: c.execution_mcps,
+                        stall_ratio_pct: c.stall_ratio_pct,
+                        be_stall_ratio_pct: c.be_stall_ratio_pct,
+                        fe_stall_ratio_pct: c.fe_stall_ratio_pct,
+                        stall_mcps: c.stall_mcps,
+                        l1d_refill_ratio_pct: c.l1d_refill_ratio_pct,
+                        l2d_refill_ratio_pct: c.l2d_refill_ratio_pct,
+                        l3d_refill_ratio_pct: c.l3d_refill_ratio_pct,
+                        llc_read_hit_ratio_pct: c.llc_read_hit_ratio_pct,
+                        l1d_mpki: c.l1d_mpki,
+                        l2d_mpki: c.l2d_mpki,
+                        l3d_mpki: c.l3d_mpki,
+                        branch_mpki: c.branch_mpki,
+                        dtlb_mpki: c.dtlb_mpki,
+                        itlb_mpki: c.itlb_mpki,
+                        branch_miss_rate_pct: c.branch_miss_rate_pct,
+                    })
+                    .collect();
+                let p = ffi_cpus.as_mut_ptr();
+                std::mem::forget(ffi_cpus);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            unsafe {
+                (*out).timestamp_ms = dp.timestamp_ms;
+                (*out).cpus = cpus_ptr;
+                (*out).cpus_count = cpus_count;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Stop a CR stream and release the handle.
+#[no_mangle]
+pub extern "C" fn profiler_stop_cr(handle: u64) -> ProfilerResult {
+    match crate::cr_handles().lock().remove(&handle) {
+        Some(h) => {
+            h.cancel();
+            ProfilerResult::Ok
+        }
+        None => ProfilerResult::InvalidParameter,
+    }
+}
+
+/// Free the dynamic arrays inside a `ProfilerCrData`.
+#[no_mangle]
+pub extern "C" fn profiler_free_cr_data(data: *mut ProfilerCrData) {
+    if data.is_null() {
+        return;
+    }
+    unsafe {
+        let cpus_ptr = (*data).cpus;
+        let cpus_count = (*data).cpus_count;
+        if !cpus_ptr.is_null() && cpus_count > 0 {
+            drop(Vec::from_raw_parts(cpus_ptr, cpus_count, cpus_count));
+        }
+        (*data).cpus = ptr::null_mut();
+        (*data).cpus_count = 0;
+    }
+}

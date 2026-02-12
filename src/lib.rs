@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use tokio::runtime::Runtime;
 
 use crate::grpc::client::ProfilerClient;
-use crate::grpc::streaming::RtbStreamHandle;
+use crate::grpc::streaming::{RtbStreamHandle, CrStreamHandle};
 
 /// Global tokio runtime, lazily initialized via `init_runtime()`.
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -22,6 +22,12 @@ static RTB_HANDLES: OnceLock<Mutex<HashMap<u64, RtbStreamHandle>>> = OnceLock::n
 
 /// Counter for generating unique RTB handle ids.
 static NEXT_RTB_HANDLE: OnceLock<Mutex<u64>> = OnceLock::new();
+
+/// Active CR (Cache Report) stream handles keyed by handle id.
+static CR_HANDLES: OnceLock<Mutex<HashMap<u64, CrStreamHandle>>> = OnceLock::new();
+
+/// Counter for generating unique CR handle ids.
+static NEXT_CR_HANDLE: OnceLock<Mutex<u64>> = OnceLock::new();
 
 /// An active connection to a device's realtime_profile daemon.
 pub struct ConnectionEntry {
@@ -42,6 +48,8 @@ pub fn init_runtime() -> bool {
     let _ = CONNECTIONS.set(Mutex::new(HashMap::new()));
     let _ = RTB_HANDLES.set(Mutex::new(HashMap::new()));
     let _ = NEXT_RTB_HANDLE.set(Mutex::new(1));
+    let _ = CR_HANDLES.set(Mutex::new(HashMap::new()));
+    let _ = NEXT_CR_HANDLE.set(Mutex::new(1));
 
     if created {
         log::info!("profiler-core runtime initialized");
@@ -55,6 +63,14 @@ pub fn init_runtime() -> bool {
 pub fn shutdown_runtime() {
     // Drop all RTB handles (cancels streams)
     if let Some(handles) = RTB_HANDLES.get() {
+        let mut map = handles.lock();
+        for (_id, handle) in map.drain() {
+            handle.cancel();
+        }
+    }
+
+    // Drop all CR handles (cancels streams)
+    if let Some(handles) = CR_HANDLES.get() {
         let mut map = handles.lock();
         for (_id, handle) in map.drain() {
             handle.cancel();
@@ -99,7 +115,19 @@ pub fn next_rtb_handle_id() -> u64 {
     id
 }
 
-// Include the generated protobuf code.
-pub mod proto {
-    tonic::include_proto!("mprofiler");
+/// Get the CR handles map.
+pub fn cr_handles() -> &'static Mutex<HashMap<u64, CrStreamHandle>> {
+    CR_HANDLES.get().expect("Runtime not initialized")
 }
+
+/// Allocate a new unique CR handle id.
+pub fn next_cr_handle_id() -> u64 {
+    let counter = NEXT_CR_HANDLE.get().expect("Runtime not initialized");
+    let mut val = counter.lock();
+    let id = *val;
+    *val += 1;
+    id
+}
+
+// Re-export the shared protobuf code from mprofiler-proto.
+pub use mprofiler_proto::mprofiler as proto;

@@ -4,7 +4,7 @@ use tonic::transport::Channel;
 
 use crate::proto::profiler_service_client::ProfilerServiceClient;
 use crate::proto::{
-    ChmodRequest, ChownRequest, CreateArchiveRequest, DevicePropRequest, Empty,
+    ChmodRequest, ChownRequest, CrStreamRequest, CreateArchiveRequest, DevicePropRequest, Empty,
     ExtractArchiveRequest, FileUploadChunk, GetFileOwnerRequest, GetPidRequest,
     GetSurfaceNamesRequest, InputKeyEventRequest, InputSwipeRequest, InputTapRequest,
     InputTextRequest, InstallApkRequest, ListPackagesRequest, PackageRequest, PathExistsRequest,
@@ -122,6 +122,25 @@ impl ProfilerClient {
             })
             .await
             .context("StartRtbStream RPC failed")?;
+        Ok(resp.into_inner())
+    }
+
+    /// Start a Cache Report stream and return the tonic streaming response.
+    pub async fn start_cr_stream(
+        &mut self,
+        interval_secs: f64,
+        cpus: &[i32],
+        exclude_kernel: bool,
+    ) -> Result<tonic::Streaming<crate::proto::CrDataPoint>> {
+        let resp = self
+            .inner
+            .start_cr_stream(CrStreamRequest {
+                interval_secs,
+                cpus: cpus.to_vec(),
+                exclude_kernel,
+            })
+            .await
+            .context("StartCrStream RPC failed")?;
         Ok(resp.into_inner())
     }
 
