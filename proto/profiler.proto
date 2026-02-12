@@ -20,6 +20,7 @@ message GetPidResponse {
 message RtbStreamRequest {
   int32 pid = 1;
   double interval_secs = 2;
+  string mode = 3;             // "" = full, "mperf" = FPS + power only
 }
 
 message RtbDataPoint {
@@ -52,6 +53,8 @@ message RtbDataPoint {
   repeated float frame_times_ms = 80;
   double cpu_time_ms = 90;
   double gpu_time_ms = 91;
+  double power_avg_mw = 16;    // fuel gauge moving-average power
+  string process_name = 100;   // SurfaceFlinger surface name
 }
 
 // ---------------------------------------------------------------------------

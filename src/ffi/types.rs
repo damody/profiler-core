@@ -82,6 +82,9 @@ pub struct ProfilerRtbData {
     pub frame_times_count: usize,
     pub cpu_time_ms: f64,
     pub gpu_time_ms: f64,
+    pub power_avg_mw: f64,
+    /// Nullable UTF-16 process/surface name.
+    pub process_name: *mut u16,
 }
 
 /// Status of a Perfetto trace session.

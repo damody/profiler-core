@@ -437,12 +437,18 @@ pub extern "C" fn profiler_start_rtb(
     serial: *const u16,
     pid: i32,
     interval_secs: f64,
+    mode: *const u16,
     handle_out: *mut u64,
 ) -> ProfilerResult {
     if serial.is_null() || handle_out.is_null() {
         return ProfilerResult::InvalidParameter;
     }
     let serial_str = unsafe { from_wide_ptr(serial) };
+    let mode_str = if mode.is_null() {
+        String::new()
+    } else {
+        unsafe { from_wide_ptr(mode) }
+    };
     let rt = crate::runtime();
 
     let mut conns = crate::connections().lock();
@@ -451,7 +457,7 @@ pub extern "C" fn profiler_start_rtb(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_rtb_stream(pid, interval_secs)) {
+    match rt.block_on(entry.client.start_rtb_stream(pid, interval_secs, &mode_str)) {
         Ok(stream) => {
             let handle_id = crate::next_rtb_handle_id();
             let handle = grpc::streaming::RtbStreamHandle::start(rt, stream, 512);
@@ -550,6 +556,12 @@ pub extern "C" fn profiler_poll_rtb(handle: u64, out: *mut ProfilerRtbData) -> b
                 (*out).frame_times_count = ft_count;
                 (*out).cpu_time_ms = dp.cpu_time_ms;
                 (*out).gpu_time_ms = dp.gpu_time_ms;
+                (*out).power_avg_mw = dp.power_avg_mw;
+                (*out).process_name = if dp.process_name.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    to_wide_ptr(&dp.process_name)
+                };
             }
             true
         }
@@ -599,6 +611,9 @@ pub extern "C" fn profiler_free_rtb_data(data: *mut ProfilerRtbData) {
         }
         (*data).frame_times_ms = ptr::null_mut();
         (*data).frame_times_count = 0;
+
+        free_wide_ptr((*data).process_name);
+        (*data).process_name = ptr::null_mut();
     }
 }
 

@@ -110,12 +110,14 @@ impl ProfilerClient {
         &mut self,
         pid: i32,
         interval_secs: f64,
+        mode: &str,
     ) -> Result<tonic::Streaming<crate::proto::RtbDataPoint>> {
         let resp = self
             .inner
             .start_rtb_stream(RtbStreamRequest {
                 pid,
                 interval_secs,
+                mode: mode.to_string(),
             })
             .await
             .context("StartRtbStream RPC failed")?;
