@@ -131,6 +131,8 @@ impl ProfilerClient {
         interval_secs: f64,
         cpus: &[i32],
         exclude_kernel: bool,
+        full_mode: bool,
+        custom_events: &[u32],
     ) -> Result<tonic::Streaming<crate::proto::CrDataPoint>> {
         let resp = self
             .inner
@@ -138,6 +140,8 @@ impl ProfilerClient {
                 interval_secs,
                 cpus: cpus.to_vec(),
                 exclude_kernel,
+                full_mode,
+                custom_events: custom_events.to_vec(),
             })
             .await
             .context("StartCrStream RPC failed")?;

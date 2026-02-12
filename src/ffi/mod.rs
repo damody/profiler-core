@@ -1811,6 +1811,9 @@ pub extern "C" fn profiler_start_cr(
     cpus: *const i32,
     cpus_count: usize,
     exclude_kernel: bool,
+    full_mode: bool,
+    custom_events: *const u32,
+    custom_events_count: usize,
     handle_out: *mut u64,
 ) -> ProfilerResult {
     if serial.is_null() || handle_out.is_null() {
@@ -1822,6 +1825,11 @@ pub extern "C" fn profiler_start_cr(
     } else {
         unsafe { std::slice::from_raw_parts(cpus, cpus_count) }
     };
+    let events_slice: &[u32] = if custom_events.is_null() || custom_events_count == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(custom_events, custom_events_count) }
+    };
     let rt = crate::runtime();
 
     let mut conns = crate::connections().lock();
@@ -1830,7 +1838,7 @@ pub extern "C" fn profiler_start_cr(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_cr_stream(interval_secs, cpus_slice, exclude_kernel)) {
+    match rt.block_on(entry.client.start_cr_stream(interval_secs, cpus_slice, exclude_kernel, full_mode, events_slice)) {
         Ok(stream) => {
             let handle_id = crate::next_cr_handle_id();
             let handle = grpc::streaming::CrStreamHandle::start(rt, stream, 512);
