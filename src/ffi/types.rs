@@ -273,3 +273,26 @@ pub struct ProfilerTcData {
     pub threads: *mut ProfilerTcThreadMetrics,
     pub threads_count: usize,
 }
+
+// ---------------------------------------------------------------------------
+// CML (Cache/Memory Latency) types
+// ---------------------------------------------------------------------------
+
+/// Per-CPU latency measurement from a CML benchmark step.
+#[repr(C)]
+pub struct ProfilerCmlCpuLatency {
+    pub cpu_id: i32,
+    // 4 bytes padding here (f64 alignment)
+    pub latency_ns: f64,
+    pub error: bool,
+}
+
+/// A single CML data point (one footprint size, multiple CPUs).
+#[repr(C)]
+pub struct ProfilerCmlData {
+    pub footprint_kb: u32,
+    // 4 bytes padding here (pointer alignment)
+    pub cpus: *mut ProfilerCmlCpuLatency,
+    pub cpus_count: usize,
+    pub is_finished: bool,
+}

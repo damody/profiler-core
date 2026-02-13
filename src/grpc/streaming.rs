@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::proto::RtbDataPoint;
 use crate::proto::CrDataPoint;
 use crate::proto::TcDataPoint;
+use crate::proto::CmlDataPoint;
 
 /// A handle to an active RTB gRPC stream.
 ///
@@ -264,6 +265,103 @@ impl TcStreamHandle {
     /// Non-blocking poll: returns the next data point if available.
     pub fn poll(&self) -> Option<TcDataPoint> {
         self.queue.pop()
+    }
+
+    /// Cancel the background stream task.
+    pub fn cancel(self) {
+        self.cancel.cancel();
+    }
+}
+
+/// A handle to an active CML (Cache/Memory Latency) gRPC stream.
+///
+/// CML is a finite-length benchmark (typically ~17 data points).
+/// The background task sets `is_finished` when the stream ends naturally.
+pub struct CmlStreamHandle {
+    queue: Arc<ArrayQueue<CmlDataPoint>>,
+    cancel: CancellationToken,
+    _task: JoinHandle<()>,
+    finished: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CmlStreamHandle {
+    /// Spawn a background task that reads from the gRPC stream and pushes
+    /// data points into the internal queue.
+    pub fn start(
+        rt: &Runtime,
+        mut stream: tonic::Streaming<CmlDataPoint>,
+        capacity: usize,
+    ) -> Self {
+        let queue = Arc::new(ArrayQueue::new(capacity));
+        let cancel = CancellationToken::new();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let q = queue.clone();
+        let ct = cancel.clone();
+        let fin = finished.clone();
+        let count = Arc::new(AtomicU64::new(0));
+        let cnt = count.clone();
+
+        let task = rt.spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = ct.cancelled() => {
+                        log::info!("CML stream cancelled");
+                        break;
+                    }
+                    result = stream.message() => {
+                        match result {
+                            Ok(Some(dp)) => {
+                                let n = cnt.fetch_add(1, Ordering::Relaxed);
+                                if n < 3 {
+                                    log::info!(
+                                        "CML recv #{}: footprint={}KB cpus={}",
+                                        n, dp.footprint_kb, dp.cpus.len()
+                                    );
+                                }
+
+                                match q.push(dp) {
+                                    Ok(()) => {}
+                                    Err(rejected) => {
+                                        let _ = q.pop();
+                                        let _ = q.push(rejected);
+                                        log::trace!("CML queue full, dropped oldest sample");
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                log::info!("CML stream ended (benchmark complete)");
+                                fin.store(true, Ordering::Release);
+                                break;
+                            }
+                            Err(e) => {
+                                log::error!("CML stream error: {e}");
+                                fin.store(true, Ordering::Release);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            queue,
+            cancel,
+            _task: task,
+            finished,
+        }
+    }
+
+    /// Non-blocking poll: returns the next data point if available.
+    pub fn poll(&self) -> Option<CmlDataPoint> {
+        self.queue.pop()
+    }
+
+    /// Returns true if the background stream task has finished
+    /// (benchmark complete or error).
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
     }
 
     /// Cancel the background stream task.

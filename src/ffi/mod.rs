@@ -2109,3 +2109,151 @@ pub extern "C" fn profiler_free_tc_data(data: *mut ProfilerTcData) {
         (*data).threads_count = 0;
     }
 }
+
+// ---------------------------------------------------------------------------
+// CML (Cache/Memory Latency) streaming
+// ---------------------------------------------------------------------------
+
+/// Start a CML benchmark stream.
+///
+/// On success, `handle_out` receives an opaque handle id.  Use
+/// `profiler_poll_cml` to read data and `profiler_stop_cml` to stop.
+#[no_mangle]
+pub extern "C" fn profiler_start_cml(
+    serial: *const u16,
+    cpus: *const i32,
+    cpus_count: usize,
+    max_footprint_kb: u32,
+    min_footprint_kb: u32,
+    handle_out: *mut u64,
+) -> ProfilerResult {
+    if serial.is_null() || handle_out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let cpus_slice: &[i32] = if cpus.is_null() || cpus_count == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(cpus, cpus_count) }
+    };
+    let rt = crate::runtime();
+
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+
+    match rt.block_on(entry.client.start_cml_stream(cpus_slice, max_footprint_kb, min_footprint_kb)) {
+        Ok(stream) => {
+            let handle_id = crate::next_cml_handle_id();
+            let handle = grpc::streaming::CmlStreamHandle::start(rt, stream, 64);
+            crate::cml_handles().lock().insert(handle_id, handle);
+            unsafe { *handle_out = handle_id; }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            log::error!("profiler_start_cml: {e:#}");
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Non-blocking poll for the next CML data point.
+///
+/// Returns `true` if data was available and `out` was populated.
+/// Returns `false` if no data is available yet (caller should try again).
+/// The `is_finished` field in `out` indicates whether the benchmark has completed.
+#[no_mangle]
+pub extern "C" fn profiler_poll_cml(handle: u64, out: *mut ProfilerCmlData) -> bool {
+    if out.is_null() {
+        return false;
+    }
+
+    let handles = crate::cml_handles().lock();
+    let h = match handles.get(&handle) {
+        Some(h) => h,
+        None => return false,
+    };
+
+    let finished = h.is_finished();
+
+    match h.poll() {
+        Some(dp) => {
+            let cpus_count = dp.cpus.len();
+            let cpus_ptr = if cpus_count > 0 {
+                let mut ffi_cpus: Vec<ProfilerCmlCpuLatency> = dp
+                    .cpus
+                    .iter()
+                    .map(|c| ProfilerCmlCpuLatency {
+                        cpu_id: c.cpu_id,
+                        latency_ns: c.latency_ns,
+                        error: c.error,
+                    })
+                    .collect();
+                let p = ffi_cpus.as_mut_ptr();
+                std::mem::forget(ffi_cpus);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            unsafe {
+                (*out).footprint_kb = dp.footprint_kb;
+                (*out).cpus = cpus_ptr;
+                (*out).cpus_count = cpus_count;
+                (*out).is_finished = finished;
+            }
+            true
+        }
+        None => {
+            // No data, but still report finished status
+            unsafe {
+                (*out).footprint_kb = 0;
+                (*out).cpus = ptr::null_mut();
+                (*out).cpus_count = 0;
+                (*out).is_finished = finished;
+            }
+            false
+        }
+    }
+}
+
+/// Stop a CML stream and release the handle.
+#[no_mangle]
+pub extern "C" fn profiler_stop_cml(handle: u64) -> ProfilerResult {
+    match crate::cml_handles().lock().remove(&handle) {
+        Some(h) => {
+            h.cancel();
+            ProfilerResult::Ok
+        }
+        None => ProfilerResult::InvalidParameter,
+    }
+}
+
+/// Free the dynamic arrays inside a `ProfilerCmlData`.
+#[no_mangle]
+pub extern "C" fn profiler_free_cml_data(data: *mut ProfilerCmlData) {
+    if data.is_null() {
+        return;
+    }
+    unsafe {
+        let cpus_ptr = (*data).cpus;
+        let cpus_count = (*data).cpus_count;
+        if !cpus_ptr.is_null() && cpus_count > 0 {
+            drop(Vec::from_raw_parts(cpus_ptr, cpus_count, cpus_count));
+        }
+        (*data).cpus = ptr::null_mut();
+        (*data).cpus_count = 0;
+    }
+}
+
+/// Check whether a CML stream has finished (benchmark complete).
+#[no_mangle]
+pub extern "C" fn profiler_cml_is_finished(handle: u64) -> bool {
+    let handles = crate::cml_handles().lock();
+    match handles.get(&handle) {
+        Some(h) => h.is_finished(),
+        None => true,
+    }
+}

@@ -4,13 +4,13 @@ use tonic::transport::Channel;
 
 use crate::proto::profiler_service_client::ProfilerServiceClient;
 use crate::proto::{
-    ChmodRequest, ChownRequest, CrStreamRequest, CreateArchiveRequest, DevicePropRequest, Empty,
-    ExtractArchiveRequest, FileUploadChunk, GetFileOwnerRequest, GetPidRequest,
-    GetSurfaceNamesRequest, InputKeyEventRequest, InputSwipeRequest, InputTapRequest,
-    InputTextRequest, InstallApkRequest, ListPackagesRequest, PackageRequest, PathExistsRequest,
-    PerfettoRequest, PerfettoResponse, PullFileRequest, RemoveFileRequest, RtbStreamRequest,
-    RtbSummaryRequest, ScreenshotRequest, SetChargingRequest, ShellRequest, StopResponse,
-    TcStreamRequest,
+    ChmodRequest, ChownRequest, CmlStreamRequest, CrStreamRequest, CreateArchiveRequest,
+    DevicePropRequest, Empty, ExtractArchiveRequest, FileUploadChunk, GetFileOwnerRequest,
+    GetPidRequest, GetSurfaceNamesRequest, InputKeyEventRequest, InputSwipeRequest,
+    InputTapRequest, InputTextRequest, InstallApkRequest, ListPackagesRequest, PackageRequest,
+    PathExistsRequest, PerfettoRequest, PerfettoResponse, PullFileRequest, RemoveFileRequest,
+    RtbStreamRequest, RtbSummaryRequest, ScreenshotRequest, SetChargingRequest, ShellRequest,
+    StopResponse, TcStreamRequest,
 };
 
 /// High-level wrapper around the gRPC ProfilerServiceClient.
@@ -148,6 +148,25 @@ impl ProfilerClient {
             })
             .await
             .context("StartCrStream RPC failed")?;
+        Ok(resp.into_inner())
+    }
+
+    /// Start a CML (Cache/Memory Latency) benchmark stream.
+    pub async fn start_cml_stream(
+        &mut self,
+        cpus: &[i32],
+        max_footprint_kb: u32,
+        min_footprint_kb: u32,
+    ) -> Result<tonic::Streaming<crate::proto::CmlDataPoint>> {
+        let resp = self
+            .inner
+            .start_cml_stream(CmlStreamRequest {
+                cpus: cpus.to_vec(),
+                max_footprint_kb,
+                min_footprint_kb,
+            })
+            .await
+            .context("StartCmlStream RPC failed")?;
         Ok(resp.into_inner())
     }
 
