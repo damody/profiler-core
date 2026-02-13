@@ -145,6 +145,7 @@ pub struct ProfilerShellResult {
 pub struct ProfilerTemperature {
     pub battery_temp_c: f64,
     pub board_temp_c: f64,
+    pub battery_level_pct: u32,
 }
 
 // ---------------------------------------------------------------------------

@@ -648,15 +648,15 @@ impl ProfilerClient {
         Ok(resp.exists)
     }
 
-    /// Get battery and board temperatures from the device.
-    pub async fn get_temperature(&mut self) -> Result<(f64, f64)> {
+    /// Get battery and board temperatures and battery level from the device.
+    pub async fn get_temperature(&mut self) -> Result<(f64, f64, u32)> {
         let resp = self
             .inner
             .get_temperature(Empty {})
             .await
             .context("GetTemperature RPC failed")?
             .into_inner();
-        Ok((resp.battery_temp_c, resp.board_temp_c))
+        Ok((resp.battery_temp_c, resp.board_temp_c, resp.battery_level_pct))
     }
 
     // =========================================================================

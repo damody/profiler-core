@@ -1455,10 +1455,11 @@ pub extern "C" fn profiler_get_temperature(
 
     with_connection!(serial, |rt, entry| {
         match rt.block_on(entry.client.get_temperature()) {
-            Ok((battery, board)) => {
+            Ok((battery, board, level)) => {
                 unsafe {
                     (*out).battery_temp_c = battery;
                     (*out).board_temp_c = board;
+                    (*out).battery_level_pct = level;
                 }
                 ProfilerResult::Ok
             }
