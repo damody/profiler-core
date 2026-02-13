@@ -83,6 +83,50 @@ pub async fn is_root_shell(serial: &str) -> Result<bool> {
     Ok(id_output.contains("uid=0"))
 }
 
+/// Run `adb disconnect` to disconnect all WiFi-connected devices.
+pub async fn disconnect_all() -> Result<String> {
+    let output = super::adb_command()
+        .arg("disconnect")
+        .output()
+        .await
+        .context("Failed to execute adb disconnect")?;
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Run `adb -s <serial> tcpip <port>` to restart adbd in TCP/IP mode.
+pub async fn tcpip(serial: &str, port: u16) -> Result<String> {
+    let output = super::adb_command()
+        .args(["-s", serial, "tcpip", &port.to_string()])
+        .output()
+        .await
+        .context("Failed to execute adb tcpip")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("adb tcpip failed: {stderr}");
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Run `adb connect <ip>:<port>` and verify the connection succeeded.
+pub async fn connect_device(ip: &str, port: u16) -> Result<String> {
+    let target = format!("{ip}:{port}");
+    let output = super::adb_command()
+        .args(["connect", &target])
+        .output()
+        .await
+        .context("Failed to execute adb connect")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.contains("cannot connect") || stdout.contains("failed to connect") {
+        anyhow::bail!("adb connect failed: {stdout}");
+    }
+
+    Ok(stdout)
+}
+
 /// Set up ADB port forwarding: local TCP port -> device TCP port.
 pub async fn forward(serial: &str, local_port: u16, remote_port: u16) -> Result<()> {
     let output = super::adb_command()

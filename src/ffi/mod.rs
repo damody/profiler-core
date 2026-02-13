@@ -4,8 +4,6 @@ pub mod utils;
 use std::ffi::c_void;
 use std::ptr;
 
-use log;
-
 use crate::adb;
 use crate::grpc;
 use crate::ffi::types::*;
@@ -18,10 +16,29 @@ use crate::ffi::utils::*;
 /// Initialise the profiler runtime.  Must be called before any other function.
 #[no_mangle]
 pub extern "C" fn profiler_init() -> ProfilerResult {
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("profiler_core=info"),
-    )
-    .try_init();
+    use log4rs::append::file::FileAppender;
+    use log4rs::config::{Appender, Config, Root};
+    use log4rs::encode::pattern::PatternEncoder;
+
+    let logfile = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new(
+            "{d(%Y-%m-%d %H:%M:%S%.3f)} [{l}] {m}{n}",
+        )))
+        .build("profiler_core.log");
+
+    if let Ok(appender) = logfile {
+        let config = Config::builder()
+            .appender(Appender::builder().build("file", Box::new(appender)))
+            .build(
+                Root::builder()
+                    .appender("file")
+                    .build(log::LevelFilter::Info),
+            );
+        if let Ok(cfg) = config {
+            let _ = log4rs::init_config(cfg);
+        }
+    }
+
     crate::init_runtime();
     log::info!("profiler_init complete");
     ProfilerResult::Ok
@@ -812,21 +829,37 @@ pub extern "C" fn profiler_adb_shell(
     command: *const u16,
     out: *mut *mut u16,
 ) -> ProfilerResult {
-    if serial.is_null() || command.is_null() || out.is_null() {
-        return ProfilerResult::InvalidParameter;
-    }
-    let serial_str = unsafe { from_wide_ptr(serial) };
-    let command_str = unsafe { from_wide_ptr(command) };
-    let rt = crate::runtime();
-
-    match rt.block_on(adb::commands::shell(&serial_str, &command_str)) {
-        Ok(output) => {
-            unsafe { *out = to_wide_ptr(&output); }
-            ProfilerResult::Ok
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if serial.is_null() || command.is_null() || out.is_null() {
+            return ProfilerResult::InvalidParameter;
         }
+        let serial_str = unsafe { from_wide_ptr(serial) };
+        let command_str = unsafe { from_wide_ptr(command) };
+        let rt = crate::runtime();
+
+        match rt.block_on(adb::commands::shell(&serial_str, &command_str)) {
+            Ok(output) => {
+                unsafe { *out = to_wide_ptr(&output); }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_adb_shell: {e:#}");
+                unsafe { *out = ptr::null_mut(); }
+                ProfilerResult::OperationFailed
+            }
+        }
+    })) {
+        Ok(r) => r,
         Err(e) => {
-            log::error!("profiler_adb_shell: {e:#}");
-            unsafe { *out = ptr::null_mut(); }
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                format!("profiler_adb_shell panicked: {s}")
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                format!("profiler_adb_shell panicked: {s}")
+            } else {
+                "profiler_adb_shell panicked (unknown payload)".to_string()
+            };
+            log::error!("{msg}");
+            crate::set_last_error(&msg);
             ProfilerResult::OperationFailed
         }
     }
@@ -836,6 +869,89 @@ pub extern "C" fn profiler_adb_shell(
 #[no_mangle]
 pub extern "C" fn profiler_free_string(ptr: *mut u16) {
     unsafe { free_wide_ptr(ptr); }
+}
+
+// ---------------------------------------------------------------------------
+// WiFi ADB
+// ---------------------------------------------------------------------------
+
+/// Connect to the device over WiFi ADB.
+///
+/// 1. Disconnect all existing WiFi ADB connections.
+/// 2. Switch the device to TCP/IP mode (`adb tcpip`).
+/// 3. Wait 2 seconds for adbd to restart.
+/// 4. Connect via `adb connect ip:port`.
+///
+/// On success, `*out` is set to a newly-allocated wide string with the
+/// connection result.  Caller must free with `profiler_free_string`.
+#[no_mangle]
+pub extern "C" fn profiler_wifi_adb_connect(
+    serial: *const u16,
+    device_ip: *const u16,
+    port: u16,
+    out: *mut *mut u16,
+) -> ProfilerResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if serial.is_null() || device_ip.is_null() || out.is_null() {
+            return ProfilerResult::InvalidParameter;
+        }
+        let serial_str = unsafe { from_wide_ptr(serial) };
+        let ip_str = unsafe { from_wide_ptr(device_ip) };
+        log::info!("profiler_wifi_adb_connect: serial={serial_str}, ip={ip_str}, port={port}");
+        if serial_str.is_empty() || ip_str.is_empty() {
+            return ProfilerResult::InvalidParameter;
+        }
+
+        let rt = crate::runtime();
+
+        // 1. Disconnect all (best-effort)
+        log::info!("profiler_wifi_adb_connect: step 1 — disconnect_all");
+        let _ = rt.block_on(adb::commands::disconnect_all());
+
+        // 2. Switch to tcpip mode
+        log::info!("profiler_wifi_adb_connect: step 2 — tcpip {port}");
+        if let Err(e) = rt.block_on(adb::commands::tcpip(&serial_str, port)) {
+            let msg = format!("adb tcpip failed: {e:#}");
+            log::error!("profiler_wifi_adb_connect: {msg}");
+            crate::set_last_error(&msg);
+            return ProfilerResult::OperationFailed;
+        }
+
+        // 3. Wait for adbd to restart
+        log::info!("profiler_wifi_adb_connect: step 3 — sleep 2s");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // 4. Connect
+        log::info!("profiler_wifi_adb_connect: step 4 — connect {ip_str}:{port}");
+        match rt.block_on(adb::commands::connect_device(&ip_str, port)) {
+            Ok(result) => {
+                log::info!("profiler_wifi_adb_connect: success — {result}");
+                unsafe { *out = to_wide_ptr(&result); }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                let msg = format!("adb connect failed: {e:#}");
+                log::error!("profiler_wifi_adb_connect: {msg}");
+                crate::set_last_error(&msg);
+                unsafe { *out = ptr::null_mut(); }
+                ProfilerResult::OperationFailed
+            }
+        }
+    })) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                format!("profiler_wifi_adb_connect panicked: {s}")
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                format!("profiler_wifi_adb_connect panicked: {s}")
+            } else {
+                "profiler_wifi_adb_connect panicked (unknown payload)".to_string()
+            };
+            log::error!("{msg}");
+            crate::set_last_error(&msg);
+            ProfilerResult::OperationFailed
+        }
+    }
 }
 
 // ===========================================================================
