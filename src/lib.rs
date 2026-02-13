@@ -8,6 +8,10 @@ use std::sync::OnceLock;
 use parking_lot::Mutex;
 use tokio::runtime::Runtime;
 
+/// Last error message from FFI operations (thread-local would be ideal but
+/// OnceLock<Mutex<>> is consistent with the rest of our global state).
+static LAST_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+
 use crate::grpc::client::ProfilerClient;
 use crate::grpc::streaming::{RtbStreamHandle, CrStreamHandle, TcStreamHandle, CmlStreamHandle};
 
@@ -66,6 +70,7 @@ pub fn init_runtime() -> bool {
     let _ = NEXT_TC_HANDLE.set(Mutex::new(1));
     let _ = CML_HANDLES.set(Mutex::new(HashMap::new()));
     let _ = NEXT_CML_HANDLE.set(Mutex::new(1));
+    let _ = LAST_ERROR.set(Mutex::new(String::new()));
 
     if created {
         log::info!("profiler-core runtime initialized");
@@ -187,6 +192,21 @@ pub fn next_cml_handle_id() -> u64 {
     let id = *val;
     *val += 1;
     id
+}
+
+/// Store an error message that can be retrieved by C# via `profiler_get_last_error`.
+pub fn set_last_error(msg: impl Into<String>) {
+    if let Some(err) = LAST_ERROR.get() {
+        *err.lock() = msg.into();
+    }
+}
+
+/// Take the last error message (returns empty string if none).
+pub fn take_last_error() -> String {
+    LAST_ERROR
+        .get()
+        .map(|m| std::mem::take(&mut *m.lock()))
+        .unwrap_or_default()
 }
 
 // Re-export the shared protobuf code from mprofiler-proto.

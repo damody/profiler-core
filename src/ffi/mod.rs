@@ -33,6 +33,19 @@ pub extern "C" fn profiler_shutdown() {
     crate::shutdown_runtime();
 }
 
+/// Retrieve the last error message as a UTF-16 string.
+///
+/// Returns a pointer to a null-terminated UTF-16 string.  The caller must
+/// free it with `profiler_free_string`.  Returns null if no error is stored.
+#[no_mangle]
+pub extern "C" fn profiler_get_last_error() -> *mut u16 {
+    let msg = crate::take_last_error();
+    if msg.is_empty() {
+        return ptr::null_mut();
+    }
+    to_wide_ptr(&msg)
+}
+
 // ---------------------------------------------------------------------------
 // Device enumeration
 // ---------------------------------------------------------------------------
@@ -2153,7 +2166,9 @@ pub extern "C" fn profiler_start_cml(
             ProfilerResult::Ok
         }
         Err(e) => {
-            log::error!("profiler_start_cml: {e:#}");
+            let msg = format!("profiler_start_cml: {e:#}");
+            log::error!("{msg}");
+            crate::set_last_error(&msg);
             ProfilerResult::OperationFailed
         }
     }
