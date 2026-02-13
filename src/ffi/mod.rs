@@ -1811,6 +1811,7 @@ pub extern "C" fn profiler_start_cr(
     cpus: *const i32,
     cpus_count: usize,
     exclude_kernel: bool,
+    diff_kernel: bool,
     full_mode: bool,
     custom_events: *const u32,
     custom_events_count: usize,
@@ -1838,7 +1839,7 @@ pub extern "C" fn profiler_start_cr(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_cr_stream(interval_secs, cpus_slice, exclude_kernel, full_mode, events_slice)) {
+    match rt.block_on(entry.client.start_cr_stream(interval_secs, cpus_slice, exclude_kernel, diff_kernel, full_mode, events_slice)) {
         Ok(stream) => {
             let handle_id = crate::next_cr_handle_id();
             let handle = grpc::streaming::CrStreamHandle::start(rt, stream, 512);
@@ -1851,6 +1852,47 @@ pub extern "C" fn profiler_start_cr(
             ProfilerResult::OperationFailed
         }
     }
+}
+
+/// Convert a slice of proto CrCpuMetrics into a heap-allocated FFI array.
+/// Returns (ptr, count). Caller must free via Vec::from_raw_parts.
+fn proto_cpus_to_ffi(
+    cpus: &[crate::proto::CrCpuMetrics],
+) -> (*mut ProfilerCrCpuMetrics, usize) {
+    let count = cpus.len();
+    if count == 0 {
+        return (ptr::null_mut(), 0);
+    }
+    let mut ffi_cpus: Vec<ProfilerCrCpuMetrics> = cpus
+        .iter()
+        .map(|c| ProfilerCrCpuMetrics {
+            cpu_num: c.cpu_num,
+            cpu_freq_mhz: c.cpu_freq_mhz,
+            cpu_usage_pct: c.cpu_usage_pct,
+            mips: c.mips,
+            mcps: c.mcps,
+            cpi: c.cpi,
+            execution_mcps: c.execution_mcps,
+            stall_ratio_pct: c.stall_ratio_pct,
+            be_stall_ratio_pct: c.be_stall_ratio_pct,
+            fe_stall_ratio_pct: c.fe_stall_ratio_pct,
+            stall_mcps: c.stall_mcps,
+            l1d_refill_ratio_pct: c.l1d_refill_ratio_pct,
+            l2d_refill_ratio_pct: c.l2d_refill_ratio_pct,
+            l3d_refill_ratio_pct: c.l3d_refill_ratio_pct,
+            llc_read_hit_ratio_pct: c.llc_read_hit_ratio_pct,
+            l1d_mpki: c.l1d_mpki,
+            l2d_mpki: c.l2d_mpki,
+            l3d_mpki: c.l3d_mpki,
+            branch_mpki: c.branch_mpki,
+            dtlb_mpki: c.dtlb_mpki,
+            itlb_mpki: c.itlb_mpki,
+            branch_miss_rate_pct: c.branch_miss_rate_pct,
+        })
+        .collect();
+    let p = ffi_cpus.as_mut_ptr();
+    std::mem::forget(ffi_cpus);
+    (p, count)
 }
 
 /// Non-blocking poll for the next CR data point.
@@ -1871,47 +1913,15 @@ pub extern "C" fn profiler_poll_cr(handle: u64, out: *mut ProfilerCrData) -> boo
 
     match h.poll() {
         Some(dp) => {
-            let cpus_count = dp.cpus.len();
-            let cpus_ptr = if cpus_count > 0 {
-                let mut ffi_cpus: Vec<ProfilerCrCpuMetrics> = dp
-                    .cpus
-                    .iter()
-                    .map(|c| ProfilerCrCpuMetrics {
-                        cpu_num: c.cpu_num,
-                        cpu_freq_mhz: c.cpu_freq_mhz,
-                        cpu_usage_pct: c.cpu_usage_pct,
-                        mips: c.mips,
-                        mcps: c.mcps,
-                        cpi: c.cpi,
-                        execution_mcps: c.execution_mcps,
-                        stall_ratio_pct: c.stall_ratio_pct,
-                        be_stall_ratio_pct: c.be_stall_ratio_pct,
-                        fe_stall_ratio_pct: c.fe_stall_ratio_pct,
-                        stall_mcps: c.stall_mcps,
-                        l1d_refill_ratio_pct: c.l1d_refill_ratio_pct,
-                        l2d_refill_ratio_pct: c.l2d_refill_ratio_pct,
-                        l3d_refill_ratio_pct: c.l3d_refill_ratio_pct,
-                        llc_read_hit_ratio_pct: c.llc_read_hit_ratio_pct,
-                        l1d_mpki: c.l1d_mpki,
-                        l2d_mpki: c.l2d_mpki,
-                        l3d_mpki: c.l3d_mpki,
-                        branch_mpki: c.branch_mpki,
-                        dtlb_mpki: c.dtlb_mpki,
-                        itlb_mpki: c.itlb_mpki,
-                        branch_miss_rate_pct: c.branch_miss_rate_pct,
-                    })
-                    .collect();
-                let p = ffi_cpus.as_mut_ptr();
-                std::mem::forget(ffi_cpus);
-                p
-            } else {
-                ptr::null_mut()
-            };
+            let (cpus_ptr, cpus_count) = proto_cpus_to_ffi(&dp.cpus);
+            let (kernel_cpus_ptr, kernel_cpus_count) = proto_cpus_to_ffi(&dp.kernel_cpus);
 
             unsafe {
                 (*out).timestamp_ms = dp.timestamp_ms;
                 (*out).cpus = cpus_ptr;
                 (*out).cpus_count = cpus_count;
+                (*out).kernel_cpus = kernel_cpus_ptr;
+                (*out).kernel_cpus_count = kernel_cpus_count;
             }
             true
         }
@@ -1945,5 +1955,157 @@ pub extern "C" fn profiler_free_cr_data(data: *mut ProfilerCrData) {
         }
         (*data).cpus = ptr::null_mut();
         (*data).cpus_count = 0;
+
+        let kernel_cpus_ptr = (*data).kernel_cpus;
+        let kernel_cpus_count = (*data).kernel_cpus_count;
+        if !kernel_cpus_ptr.is_null() && kernel_cpus_count > 0 {
+            drop(Vec::from_raw_parts(kernel_cpus_ptr, kernel_cpus_count, kernel_cpus_count));
+        }
+        (*data).kernel_cpus = ptr::null_mut();
+        (*data).kernel_cpus_count = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thread Cache (TC) streaming
+// ---------------------------------------------------------------------------
+
+/// Start a Thread Cache stream.
+///
+/// On success, `handle_out` receives an opaque handle id.  Use
+/// `profiler_poll_tc` to read data and `profiler_stop_tc` to stop.
+#[no_mangle]
+pub extern "C" fn profiler_start_tc(
+    serial: *const u16,
+    pid: i32,
+    interval_secs: f64,
+    exclude_kernel: bool,
+    top_threads_count: i32,
+    handle_out: *mut u64,
+) -> ProfilerResult {
+    if serial.is_null() || handle_out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let rt = crate::runtime();
+
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+
+    match rt.block_on(entry.client.start_tc_stream(pid, interval_secs, exclude_kernel, top_threads_count)) {
+        Ok(stream) => {
+            let handle_id = crate::next_tc_handle_id();
+            let handle = grpc::streaming::TcStreamHandle::start(rt, stream, 512);
+            crate::tc_handles().lock().insert(handle_id, handle);
+            unsafe { *handle_out = handle_id; }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            log::error!("profiler_start_tc: {e:#}");
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Non-blocking poll for the next TC data point.
+///
+/// Returns `true` if data was available and `out` was populated.
+/// Returns `false` if no data is available yet (caller should try again).
+#[no_mangle]
+pub extern "C" fn profiler_poll_tc(handle: u64, out: *mut ProfilerTcData) -> bool {
+    if out.is_null() {
+        return false;
+    }
+
+    let handles = crate::tc_handles().lock();
+    let h = match handles.get(&handle) {
+        Some(h) => h,
+        None => return false,
+    };
+
+    match h.poll() {
+        Some(dp) => {
+            let threads_count = dp.threads.len();
+            let threads_ptr = if threads_count > 0 {
+                let mut ffi_threads: Vec<ProfilerTcThreadMetrics> = dp
+                    .threads
+                    .iter()
+                    .map(|t| ProfilerTcThreadMetrics {
+                        thread_id: t.thread_id,
+                        thread_name: to_wide_ptr(&t.thread_name),
+                        mips: t.mips,
+                        mcps: t.mcps,
+                        cpi: t.cpi,
+                        cpu_usage_pct: t.cpu_usage_pct,
+                        l1d_refill_ratio_pct: t.l1d_refill_ratio_pct,
+                        l1i_refill_ratio_pct: t.l1i_refill_ratio_pct,
+                        l2d_refill_ratio_pct: t.l2d_refill_ratio_pct,
+                        l3d_refill_ratio_pct: t.l3d_refill_ratio_pct,
+                        llc_read_hit_ratio_pct: t.llc_read_hit_ratio_pct,
+                        stall_ratio_pct: t.stall_ratio_pct,
+                        be_stall_ratio_pct: t.be_stall_ratio_pct,
+                        fe_stall_ratio_pct: t.fe_stall_ratio_pct,
+                        stall_mcps: t.stall_mcps,
+                        be_stall_mcps: t.be_stall_mcps,
+                        fe_stall_mcps: t.fe_stall_mcps,
+                        branch_mpki: t.branch_mpki,
+                        memory_instruction_pct: t.memory_instruction_pct,
+                    })
+                    .collect();
+                let p = ffi_threads.as_mut_ptr();
+                std::mem::forget(ffi_threads);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            unsafe {
+                (*out).timestamp_ms = dp.timestamp_ms;
+                (*out).threads = threads_ptr;
+                (*out).threads_count = threads_count;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Stop a TC stream and release the handle.
+#[no_mangle]
+pub extern "C" fn profiler_stop_tc(handle: u64) -> ProfilerResult {
+    match crate::tc_handles().lock().remove(&handle) {
+        Some(h) => {
+            h.cancel();
+            ProfilerResult::Ok
+        }
+        None => ProfilerResult::InvalidParameter,
+    }
+}
+
+/// Free the dynamic arrays inside a `ProfilerTcData`.
+#[no_mangle]
+pub extern "C" fn profiler_free_tc_data(data: *mut ProfilerTcData) {
+    if data.is_null() {
+        return;
+    }
+    unsafe {
+        let threads_ptr = (*data).threads;
+        let threads_count = (*data).threads_count;
+        if !threads_ptr.is_null() && threads_count > 0 {
+            // Free each thread_name string
+            for i in 0..threads_count {
+                let thread = &mut *threads_ptr.add(i);
+                if !thread.thread_name.is_null() {
+                    free_wide_ptr(thread.thread_name);
+                    thread.thread_name = ptr::null_mut();
+                }
+            }
+            drop(Vec::from_raw_parts(threads_ptr, threads_count, threads_count));
+        }
+        (*data).threads = ptr::null_mut();
+        (*data).threads_count = 0;
     }
 }

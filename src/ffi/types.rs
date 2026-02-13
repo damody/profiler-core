@@ -220,6 +220,8 @@ pub struct ProfilerCrData {
     pub timestamp_ms: u64,
     pub cpus: *mut ProfilerCrCpuMetrics,
     pub cpus_count: usize,
+    pub kernel_cpus: *mut ProfilerCrCpuMetrics,
+    pub kernel_cpus_count: usize,
 }
 
 /// RTB summary containing post-recording statistics.
@@ -234,4 +236,40 @@ pub struct ProfilerRtbSummary {
     pub rhi_thread: ProfilerThreadSnapshot,
     pub start_temp: f64,
     pub end_temp: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Thread Cache (TC) types
+// ---------------------------------------------------------------------------
+
+/// Per-thread cache metrics.
+#[repr(C)]
+pub struct ProfilerTcThreadMetrics {
+    pub thread_id: i32,
+    pub thread_name: *mut u16,    // UTF-16 null-terminated
+    pub mips: f64,
+    pub mcps: f64,
+    pub cpi: f64,
+    pub cpu_usage_pct: f64,
+    pub l1d_refill_ratio_pct: f64,
+    pub l1i_refill_ratio_pct: f64,
+    pub l2d_refill_ratio_pct: f64,
+    pub l3d_refill_ratio_pct: f64,
+    pub llc_read_hit_ratio_pct: f64,
+    pub stall_ratio_pct: f64,
+    pub be_stall_ratio_pct: f64,
+    pub fe_stall_ratio_pct: f64,
+    pub stall_mcps: f64,
+    pub be_stall_mcps: f64,
+    pub fe_stall_mcps: f64,
+    pub branch_mpki: f64,
+    pub memory_instruction_pct: f64,
+}
+
+/// A single thread cache data point (one timestamp, multiple threads).
+#[repr(C)]
+pub struct ProfilerTcData {
+    pub timestamp_ms: u64,
+    pub threads: *mut ProfilerTcThreadMetrics,
+    pub threads_count: usize,
 }

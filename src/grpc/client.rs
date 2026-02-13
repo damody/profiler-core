@@ -10,6 +10,7 @@ use crate::proto::{
     InputTextRequest, InstallApkRequest, ListPackagesRequest, PackageRequest, PathExistsRequest,
     PerfettoRequest, PerfettoResponse, PullFileRequest, RemoveFileRequest, RtbStreamRequest,
     RtbSummaryRequest, ScreenshotRequest, SetChargingRequest, ShellRequest, StopResponse,
+    TcStreamRequest,
 };
 
 /// High-level wrapper around the gRPC ProfilerServiceClient.
@@ -131,6 +132,7 @@ impl ProfilerClient {
         interval_secs: f64,
         cpus: &[i32],
         exclude_kernel: bool,
+        diff_kernel: bool,
         full_mode: bool,
         custom_events: &[u32],
     ) -> Result<tonic::Streaming<crate::proto::CrDataPoint>> {
@@ -142,9 +144,31 @@ impl ProfilerClient {
                 exclude_kernel,
                 full_mode,
                 custom_events: custom_events.to_vec(),
+                diff_kernel,
             })
             .await
             .context("StartCrStream RPC failed")?;
+        Ok(resp.into_inner())
+    }
+
+    /// Start a Thread Cache stream and return the tonic streaming response.
+    pub async fn start_tc_stream(
+        &mut self,
+        pid: i32,
+        interval_secs: f64,
+        exclude_kernel: bool,
+        top_threads_count: i32,
+    ) -> Result<tonic::Streaming<crate::proto::TcDataPoint>> {
+        let resp = self
+            .inner
+            .start_tc_stream(TcStreamRequest {
+                pid,
+                interval_secs,
+                exclude_kernel,
+                top_threads_count,
+            })
+            .await
+            .context("StartTcStream RPC failed")?;
         Ok(resp.into_inner())
     }
 

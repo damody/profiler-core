@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::proto::RtbDataPoint;
 use crate::proto::CrDataPoint;
+use crate::proto::TcDataPoint;
 
 /// A handle to an active RTB gRPC stream.
 ///
@@ -177,6 +178,91 @@ impl CrStreamHandle {
 
     /// Non-blocking poll: returns the next data point if available.
     pub fn poll(&self) -> Option<CrDataPoint> {
+        self.queue.pop()
+    }
+
+    /// Cancel the background stream task.
+    pub fn cancel(self) {
+        self.cancel.cancel();
+    }
+}
+
+/// A handle to an active TC (Thread Cache) gRPC stream.
+///
+/// Data points are pushed into a bounded lock-free queue by a background
+/// tokio task.  The FFI layer polls the queue non-blocking.
+pub struct TcStreamHandle {
+    queue: Arc<ArrayQueue<TcDataPoint>>,
+    cancel: CancellationToken,
+    _task: JoinHandle<()>,
+}
+
+impl TcStreamHandle {
+    /// Spawn a background task that reads from the gRPC stream and pushes
+    /// data points into the internal queue.
+    pub fn start(
+        rt: &Runtime,
+        mut stream: tonic::Streaming<TcDataPoint>,
+        capacity: usize,
+    ) -> Self {
+        let queue = Arc::new(ArrayQueue::new(capacity));
+        let cancel = CancellationToken::new();
+
+        let q = queue.clone();
+        let ct = cancel.clone();
+        let count = Arc::new(AtomicU64::new(0));
+        let cnt = count.clone();
+
+        let task = rt.spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = ct.cancelled() => {
+                        log::info!("TC stream cancelled");
+                        break;
+                    }
+                    result = stream.message() => {
+                        match result {
+                            Ok(Some(dp)) => {
+                                let n = cnt.fetch_add(1, Ordering::Relaxed);
+                                if n < 3 {
+                                    log::info!(
+                                        "TC recv #{}: ts={} threads={}",
+                                        n, dp.timestamp_ms, dp.threads.len()
+                                    );
+                                }
+
+                                match q.push(dp) {
+                                    Ok(()) => {}
+                                    Err(rejected) => {
+                                        let _ = q.pop();
+                                        let _ = q.push(rejected);
+                                        log::trace!("TC queue full, dropped oldest sample");
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                log::info!("TC stream ended (server closed)");
+                                break;
+                            }
+                            Err(e) => {
+                                log::error!("TC stream error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            queue,
+            cancel,
+            _task: task,
+        }
+    }
+
+    /// Non-blocking poll: returns the next data point if available.
+    pub fn poll(&self) -> Option<TcDataPoint> {
         self.queue.pop()
     }
 
