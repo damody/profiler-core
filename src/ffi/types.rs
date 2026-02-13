@@ -222,6 +222,8 @@ pub struct ProfilerCrData {
     pub cpus_count: usize,
     pub kernel_cpus: *mut ProfilerCrCpuMetrics,
     pub kernel_cpus_count: usize,
+    pub include_cpus: *mut ProfilerCrCpuMetrics,
+    pub include_cpus_count: usize,
 }
 
 /// RTB summary containing post-recording statistics.

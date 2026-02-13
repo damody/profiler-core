@@ -1928,6 +1928,7 @@ pub extern "C" fn profiler_poll_cr(handle: u64, out: *mut ProfilerCrData) -> boo
         Some(dp) => {
             let (cpus_ptr, cpus_count) = proto_cpus_to_ffi(&dp.cpus);
             let (kernel_cpus_ptr, kernel_cpus_count) = proto_cpus_to_ffi(&dp.kernel_cpus);
+            let (include_cpus_ptr, include_cpus_count) = proto_cpus_to_ffi(&dp.include_cpus);
 
             unsafe {
                 (*out).timestamp_ms = dp.timestamp_ms;
@@ -1935,6 +1936,8 @@ pub extern "C" fn profiler_poll_cr(handle: u64, out: *mut ProfilerCrData) -> boo
                 (*out).cpus_count = cpus_count;
                 (*out).kernel_cpus = kernel_cpus_ptr;
                 (*out).kernel_cpus_count = kernel_cpus_count;
+                (*out).include_cpus = include_cpus_ptr;
+                (*out).include_cpus_count = include_cpus_count;
             }
             true
         }
@@ -1976,6 +1979,14 @@ pub extern "C" fn profiler_free_cr_data(data: *mut ProfilerCrData) {
         }
         (*data).kernel_cpus = ptr::null_mut();
         (*data).kernel_cpus_count = 0;
+
+        let include_cpus_ptr = (*data).include_cpus;
+        let include_cpus_count = (*data).include_cpus_count;
+        if !include_cpus_ptr.is_null() && include_cpus_count > 0 {
+            drop(Vec::from_raw_parts(include_cpus_ptr, include_cpus_count, include_cpus_count));
+        }
+        (*data).include_cpus = ptr::null_mut();
+        (*data).include_cpus_count = 0;
     }
 }
 
