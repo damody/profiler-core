@@ -54,7 +54,7 @@ impl RtbStreamHandle {
                                     log::info!(
                                         "RTB recv #{}: ts={} fps={} power={} temp={} gpu={}MHz/{}%",
                                         n, dp.timestamp_ms, dp.fps, dp.power_mw,
-                                        dp.battery_temp_c, dp.gpu_freq_mhz, dp.gpu_loading_pct
+                                        dp.board_temp_c, dp.gpu_freq_mhz, dp.gpu_loading_pct
                                     );
                                 }
 

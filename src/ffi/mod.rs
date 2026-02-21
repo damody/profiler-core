@@ -559,6 +559,7 @@ pub extern "C" fn profiler_poll_rtb(handle: u64, out: *mut ProfilerRtbData) -> b
                 (*out).power_mw = dp.power_mw;
                 (*out).power_ma = dp.power_ma;
                 (*out).voltage_v = dp.voltage_v;
+                (*out).board_temp_c = dp.board_temp_c;
                 (*out).battery_temp_c = dp.battery_temp_c;
                 (*out).gpu_freq_mhz = dp.gpu_freq_mhz;
                 (*out).gpu_loading_pct = dp.gpu_loading_pct;

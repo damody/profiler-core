@@ -52,6 +52,7 @@ pub struct ProfilerRtbData {
     pub power_mw: f64,
     pub power_ma: f64,
     pub voltage_v: f64,
+    pub board_temp_c: f64,
     pub battery_temp_c: f64,
     pub gpu_freq_mhz: f64,
     pub gpu_loading_pct: f64,

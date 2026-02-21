@@ -29,7 +29,9 @@ message RtbDataPoint {
   double power_mw = 12;
   double power_ma = 13;
   double voltage_v = 14;
-  double battery_temp_c = 15;
+  double board_temp_c = 15;
+  double power_avg_mw = 16;    // fuel gauge moving-average power
+  double battery_temp_c = 17;
   double gpu_freq_mhz = 20;
   double gpu_loading_pct = 21;
   double bcpu_freq_mhz = 30;
@@ -53,7 +55,6 @@ message RtbDataPoint {
   repeated float frame_times_ms = 80;
   double cpu_time_ms = 90;
   double gpu_time_ms = 91;
-  double power_avg_mw = 16;    // fuel gauge moving-average power
   string process_name = 100;   // SurfaceFlinger surface name
 }
 
