@@ -2234,14 +2234,12 @@ fn proto_tc_threads_to_ffi(
             l1i_refill_ratio_pct: t.l1i_refill_ratio_pct,
             l2d_refill_ratio_pct: t.l2d_refill_ratio_pct,
             l3d_refill_ratio_pct: t.l3d_refill_ratio_pct,
-            llc_read_hit_ratio_pct: t.llc_read_hit_ratio_pct,
             stall_ratio_pct: t.stall_ratio_pct,
             be_stall_ratio_pct: t.be_stall_ratio_pct,
             fe_stall_ratio_pct: t.fe_stall_ratio_pct,
             stall_mcps: t.stall_mcps,
             be_stall_mcps: t.be_stall_mcps,
             fe_stall_mcps: t.fe_stall_mcps,
-            branch_mpki: t.branch_mpki,
             memory_instruction_pct: t.memory_instruction_pct,
         })
         .collect();

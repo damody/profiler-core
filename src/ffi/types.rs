@@ -259,14 +259,12 @@ pub struct ProfilerTcThreadMetrics {
     pub l1i_refill_ratio_pct: f64,
     pub l2d_refill_ratio_pct: f64,
     pub l3d_refill_ratio_pct: f64,
-    pub llc_read_hit_ratio_pct: f64,
     pub stall_ratio_pct: f64,
     pub be_stall_ratio_pct: f64,
     pub fe_stall_ratio_pct: f64,
     pub stall_mcps: f64,
     pub be_stall_mcps: f64,
     pub fe_stall_mcps: f64,
-    pub branch_mpki: f64,
     pub memory_instruction_pct: f64,
 }
 
