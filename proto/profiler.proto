@@ -46,7 +46,7 @@ message RtbDataPoint {
   double render_mips = 43;
   double rhi_mips = 44;
   double dsu_freq_mhz = 50;
-  double dram_freq_mbps = 51;
+  double dram_freq_mhz = 51;
   double vcore_v = 52;
   uint64 wss_kb = 70;
   uint64 pss_kb = 71;

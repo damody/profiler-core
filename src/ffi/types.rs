@@ -73,7 +73,7 @@ pub struct ProfilerRtbData {
     pub render_mips: f64,
     pub rhi_mips: f64,
     pub dsu_freq_mhz: f64,
-    pub dram_freq_mbps: f64,
+    pub dram_freq_mhz: f64,
     pub vcore_v: f64,
     pub wss_kb: u64,
     pub pss_kb: u64,
@@ -275,6 +275,8 @@ pub struct ProfilerTcData {
     pub timestamp_ms: u64,
     pub threads: *mut ProfilerTcThreadMetrics,
     pub threads_count: usize,
+    pub kernel_threads: *mut ProfilerTcThreadMetrics,
+    pub kernel_threads_count: usize,
 }
 
 // ---------------------------------------------------------------------------

@@ -176,6 +176,7 @@ impl ProfilerClient {
         pid: i32,
         interval_secs: f64,
         exclude_kernel: bool,
+        diff_kernel: bool,
         top_threads_count: i32,
     ) -> Result<tonic::Streaming<crate::proto::TcDataPoint>> {
         let resp = self
@@ -184,6 +185,7 @@ impl ProfilerClient {
                 pid,
                 interval_secs,
                 exclude_kernel,
+                diff_kernel,
                 top_threads_count,
             })
             .await

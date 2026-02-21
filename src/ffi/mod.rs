@@ -578,7 +578,7 @@ pub extern "C" fn profiler_poll_rtb(handle: u64, out: *mut ProfilerRtbData) -> b
                 (*out).render_mips = dp.render_mips;
                 (*out).rhi_mips = dp.rhi_mips;
                 (*out).dsu_freq_mhz = dp.dsu_freq_mhz;
-                (*out).dram_freq_mbps = dp.dram_freq_mbps;
+                (*out).dram_freq_mhz = dp.dram_freq_mhz;
                 (*out).vcore_v = dp.vcore_v;
                 (*out).wss_kb = dp.wss_kb;
                 (*out).pss_kb = dp.pss_kb;
@@ -2121,6 +2121,7 @@ pub extern "C" fn profiler_start_tc(
     pid: i32,
     interval_secs: f64,
     exclude_kernel: bool,
+    diff_kernel: bool,
     top_threads_count: i32,
     handle_out: *mut u64,
 ) -> ProfilerResult {
@@ -2136,7 +2137,7 @@ pub extern "C" fn profiler_start_tc(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_tc_stream(pid, interval_secs, exclude_kernel, top_threads_count)) {
+    match rt.block_on(entry.client.start_tc_stream(pid, interval_secs, exclude_kernel, diff_kernel, top_threads_count)) {
         Ok(stream) => {
             let handle_id = crate::next_tc_handle_id();
             let handle = grpc::streaming::TcStreamHandle::start(rt, stream, 512);
@@ -2149,6 +2150,43 @@ pub extern "C" fn profiler_start_tc(
             ProfilerResult::OperationFailed
         }
     }
+}
+
+/// Convert a slice of proto TcThreadMetrics into an FFI array.
+fn proto_tc_threads_to_ffi(
+    threads: &[crate::proto::TcThreadMetrics],
+) -> (*mut ProfilerTcThreadMetrics, usize) {
+    let count = threads.len();
+    if count == 0 {
+        return (ptr::null_mut(), 0);
+    }
+    let mut ffi: Vec<ProfilerTcThreadMetrics> = threads
+        .iter()
+        .map(|t| ProfilerTcThreadMetrics {
+            thread_id: t.thread_id,
+            thread_name: to_wide_ptr(&t.thread_name),
+            mips: t.mips,
+            mcps: t.mcps,
+            cpi: t.cpi,
+            cpu_usage_pct: t.cpu_usage_pct,
+            l1d_refill_ratio_pct: t.l1d_refill_ratio_pct,
+            l1i_refill_ratio_pct: t.l1i_refill_ratio_pct,
+            l2d_refill_ratio_pct: t.l2d_refill_ratio_pct,
+            l3d_refill_ratio_pct: t.l3d_refill_ratio_pct,
+            llc_read_hit_ratio_pct: t.llc_read_hit_ratio_pct,
+            stall_ratio_pct: t.stall_ratio_pct,
+            be_stall_ratio_pct: t.be_stall_ratio_pct,
+            fe_stall_ratio_pct: t.fe_stall_ratio_pct,
+            stall_mcps: t.stall_mcps,
+            be_stall_mcps: t.be_stall_mcps,
+            fe_stall_mcps: t.fe_stall_mcps,
+            branch_mpki: t.branch_mpki,
+            memory_instruction_pct: t.memory_instruction_pct,
+        })
+        .collect();
+    let p = ffi.as_mut_ptr();
+    std::mem::forget(ffi);
+    (p, count)
 }
 
 /// Non-blocking poll for the next TC data point.
@@ -2169,44 +2207,15 @@ pub extern "C" fn profiler_poll_tc(handle: u64, out: *mut ProfilerTcData) -> boo
 
     match h.poll() {
         Some(dp) => {
-            let threads_count = dp.threads.len();
-            let threads_ptr = if threads_count > 0 {
-                let mut ffi_threads: Vec<ProfilerTcThreadMetrics> = dp
-                    .threads
-                    .iter()
-                    .map(|t| ProfilerTcThreadMetrics {
-                        thread_id: t.thread_id,
-                        thread_name: to_wide_ptr(&t.thread_name),
-                        mips: t.mips,
-                        mcps: t.mcps,
-                        cpi: t.cpi,
-                        cpu_usage_pct: t.cpu_usage_pct,
-                        l1d_refill_ratio_pct: t.l1d_refill_ratio_pct,
-                        l1i_refill_ratio_pct: t.l1i_refill_ratio_pct,
-                        l2d_refill_ratio_pct: t.l2d_refill_ratio_pct,
-                        l3d_refill_ratio_pct: t.l3d_refill_ratio_pct,
-                        llc_read_hit_ratio_pct: t.llc_read_hit_ratio_pct,
-                        stall_ratio_pct: t.stall_ratio_pct,
-                        be_stall_ratio_pct: t.be_stall_ratio_pct,
-                        fe_stall_ratio_pct: t.fe_stall_ratio_pct,
-                        stall_mcps: t.stall_mcps,
-                        be_stall_mcps: t.be_stall_mcps,
-                        fe_stall_mcps: t.fe_stall_mcps,
-                        branch_mpki: t.branch_mpki,
-                        memory_instruction_pct: t.memory_instruction_pct,
-                    })
-                    .collect();
-                let p = ffi_threads.as_mut_ptr();
-                std::mem::forget(ffi_threads);
-                p
-            } else {
-                ptr::null_mut()
-            };
+            let (threads_ptr, threads_count) = proto_tc_threads_to_ffi(&dp.threads);
+            let (kernel_ptr, kernel_count) = proto_tc_threads_to_ffi(&dp.kernel_threads);
 
             unsafe {
                 (*out).timestamp_ms = dp.timestamp_ms;
                 (*out).threads = threads_ptr;
                 (*out).threads_count = threads_count;
+                (*out).kernel_threads = kernel_ptr;
+                (*out).kernel_threads_count = kernel_count;
             }
             true
         }
@@ -2226,6 +2235,20 @@ pub extern "C" fn profiler_stop_tc(handle: u64) -> ProfilerResult {
     }
 }
 
+/// Free a TC thread metrics array (pointer + count).
+unsafe fn free_tc_thread_array(ptr: *mut ProfilerTcThreadMetrics, count: usize) {
+    if !ptr.is_null() && count > 0 {
+        for i in 0..count {
+            let thread = &mut *ptr.add(i);
+            if !thread.thread_name.is_null() {
+                free_wide_ptr(thread.thread_name);
+                thread.thread_name = ptr::null_mut();
+            }
+        }
+        drop(Vec::from_raw_parts(ptr, count, count));
+    }
+}
+
 /// Free the dynamic arrays inside a `ProfilerTcData`.
 #[no_mangle]
 pub extern "C" fn profiler_free_tc_data(data: *mut ProfilerTcData) {
@@ -2233,21 +2256,13 @@ pub extern "C" fn profiler_free_tc_data(data: *mut ProfilerTcData) {
         return;
     }
     unsafe {
-        let threads_ptr = (*data).threads;
-        let threads_count = (*data).threads_count;
-        if !threads_ptr.is_null() && threads_count > 0 {
-            // Free each thread_name string
-            for i in 0..threads_count {
-                let thread = &mut *threads_ptr.add(i);
-                if !thread.thread_name.is_null() {
-                    free_wide_ptr(thread.thread_name);
-                    thread.thread_name = ptr::null_mut();
-                }
-            }
-            drop(Vec::from_raw_parts(threads_ptr, threads_count, threads_count));
-        }
+        free_tc_thread_array((*data).threads, (*data).threads_count);
         (*data).threads = ptr::null_mut();
         (*data).threads_count = 0;
+
+        free_tc_thread_array((*data).kernel_threads, (*data).kernel_threads_count);
+        (*data).kernel_threads = ptr::null_mut();
+        (*data).kernel_threads_count = 0;
     }
 }
 
