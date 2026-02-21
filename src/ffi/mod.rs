@@ -261,7 +261,15 @@ pub extern "C" fn profiler_deploy_and_connect(
     }
 
     // Port forwarding (local port → device port)
-    if let Err(e) = rt.block_on(adb::commands::forward(&serial_str, port, port)) {
+    // If the daemon was already running (e.g. started via USB), it may listen
+    // on a different port than `port`.  Detect the actual port from cmdline.
+    let daemon_port = rt
+        .block_on(adb::daemon::get_grpc_port(&serial_str))
+        .unwrap_or(port);
+    log::info!(
+        "profiler_deploy_and_connect: requested port={port}, daemon_port={daemon_port}"
+    );
+    if let Err(e) = rt.block_on(adb::commands::forward(&serial_str, port, daemon_port)) {
         log::error!("profiler_deploy_and_connect: adb forward failed: {e:#}");
         return ProfilerResult::OperationFailed;
     }
@@ -947,6 +955,58 @@ pub extern "C" fn profiler_wifi_adb_connect(
                 format!("profiler_wifi_adb_connect panicked: {s}")
             } else {
                 "profiler_wifi_adb_connect panicked (unknown payload)".to_string()
+            };
+            log::error!("{msg}");
+            crate::set_last_error(&msg);
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Disconnect a specific WiFi ADB device.
+///
+/// On success, `*out` is set to a newly-allocated wide string with the
+/// disconnect result.  Caller must free with `profiler_free_string`.
+#[no_mangle]
+pub extern "C" fn profiler_wifi_adb_disconnect(
+    serial: *const u16,
+    out: *mut *mut u16,
+) -> ProfilerResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if serial.is_null() || out.is_null() {
+            return ProfilerResult::InvalidParameter;
+        }
+        let serial_str = unsafe { from_wide_ptr(serial) };
+        log::info!("profiler_wifi_adb_disconnect: serial={serial_str}");
+        if serial_str.is_empty() {
+            return ProfilerResult::InvalidParameter;
+        }
+
+        let rt = crate::runtime();
+
+        match rt.block_on(adb::commands::disconnect(&serial_str)) {
+            Ok(result) => {
+                log::info!("profiler_wifi_adb_disconnect: success — {result}");
+                unsafe { *out = to_wide_ptr(&result); }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                let msg = format!("adb disconnect failed: {e:#}");
+                log::error!("profiler_wifi_adb_disconnect: {msg}");
+                crate::set_last_error(&msg);
+                unsafe { *out = ptr::null_mut(); }
+                ProfilerResult::OperationFailed
+            }
+        }
+    })) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                format!("profiler_wifi_adb_disconnect panicked: {s}")
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                format!("profiler_wifi_adb_disconnect panicked: {s}")
+            } else {
+                "profiler_wifi_adb_disconnect panicked (unknown payload)".to_string()
             };
             log::error!("{msg}");
             crate::set_last_error(&msg);

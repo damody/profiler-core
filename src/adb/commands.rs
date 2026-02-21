@@ -83,6 +83,16 @@ pub async fn is_root_shell(serial: &str) -> Result<bool> {
     Ok(id_output.contains("uid=0"))
 }
 
+/// Run `adb disconnect <serial>` to disconnect a specific WiFi-connected device.
+pub async fn disconnect(serial: &str) -> Result<String> {
+    let output = super::adb_command()
+        .args(["disconnect", serial])
+        .output()
+        .await
+        .context("Failed to execute adb disconnect")?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// Run `adb disconnect` to disconnect all WiFi-connected devices.
 pub async fn disconnect_all() -> Result<String> {
     let output = super::adb_command()

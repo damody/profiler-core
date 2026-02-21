@@ -171,3 +171,25 @@ pub async fn is_running(serial: &str) -> bool {
         Err(_) => false,
     }
 }
+
+/// Query the gRPC port that the running daemon is actually listening on.
+///
+/// Reads `/proc/<pid>/cmdline` and looks for the `--grpc-port` argument.
+/// Returns `None` if the daemon is not running or the port cannot be determined.
+pub async fn get_grpc_port(serial: &str) -> Option<u16> {
+    let pid_str = commands::shell(serial, "pidof realtime_profile").await.ok()?;
+    let pid = pid_str.trim().split_whitespace().next()?;
+    if pid.is_empty() {
+        return None;
+    }
+    let cmdline = commands::shell(serial, &format!("cat /proc/{pid}/cmdline | tr '\\0' ' '"))
+        .await
+        .ok()?;
+    let parts: Vec<&str> = cmdline.split_whitespace().collect();
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "--grpc-port" {
+            return parts.get(i + 1).and_then(|s| s.parse().ok());
+        }
+    }
+    None
+}
