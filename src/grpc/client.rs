@@ -54,6 +54,28 @@ pub struct GenericResult {
     pub message: String,
 }
 
+/// RTB stream metric selection options.
+#[derive(Clone, Copy, Debug)]
+pub struct RtbStreamOptions {
+    pub enable_cpu_loading: bool,
+    pub enable_cpu_freq: bool,
+    pub enable_fps_dequeue: bool,
+    pub enable_fps_queue: bool,
+    pub enable_fps_present_fence: bool,
+}
+
+impl Default for RtbStreamOptions {
+    fn default() -> Self {
+        Self {
+            enable_cpu_loading: true,
+            enable_cpu_freq: true,
+            enable_fps_dequeue: true,
+            enable_fps_queue: true,
+            enable_fps_present_fence: true,
+        }
+    }
+}
+
 impl ProfilerClient {
     /// Connect to the gRPC server at the given address (e.g. "http://127.0.0.1:50051").
     pub async fn connect(addr: &str) -> Result<Self> {
@@ -113,6 +135,7 @@ impl ProfilerClient {
         pid: i32,
         interval_secs: f64,
         mode: &str,
+        options: RtbStreamOptions,
     ) -> Result<tonic::Streaming<crate::proto::RtbDataPoint>> {
         let resp = self
             .inner
@@ -120,6 +143,11 @@ impl ProfilerClient {
                 pid,
                 interval_secs,
                 mode: mode.to_string(),
+                enable_cpu_loading: options.enable_cpu_loading,
+                enable_cpu_freq: options.enable_cpu_freq,
+                enable_fps_dequeue: options.enable_fps_dequeue,
+                enable_fps_queue: options.enable_fps_queue,
+                enable_fps_present_fence: options.enable_fps_present_fence,
             })
             .await
             .context("StartRtbStream RPC failed")?;

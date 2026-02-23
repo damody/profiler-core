@@ -466,6 +466,20 @@ pub extern "C" fn profiler_get_pid(
 // RTB streaming
 // ---------------------------------------------------------------------------
 
+fn default_rtb_options_for_mode(mode: &str) -> grpc::client::RtbStreamOptions {
+    if mode == "mperf" {
+        grpc::client::RtbStreamOptions {
+            enable_cpu_loading: false,
+            enable_cpu_freq: false,
+            enable_fps_dequeue: true,
+            enable_fps_queue: false,
+            enable_fps_present_fence: false,
+        }
+    } else {
+        grpc::client::RtbStreamOptions::default()
+    }
+}
+
 /// Start a real-time benchmark stream.
 ///
 /// On success, `handle_out` receives an opaque handle id.  Use
@@ -478,6 +492,22 @@ pub extern "C" fn profiler_start_rtb(
     mode: *const u16,
     handle_out: *mut u64,
 ) -> ProfilerResult {
+    profiler_start_rtb_ex(serial, pid, interval_secs, mode, ptr::null(), handle_out)
+}
+
+/// Start a real-time benchmark stream with explicit metric selection options.
+///
+/// `options` may be null. When null, defaults are derived from `mode` for
+/// backward compatibility.
+#[no_mangle]
+pub extern "C" fn profiler_start_rtb_ex(
+    serial: *const u16,
+    pid: i32,
+    interval_secs: f64,
+    mode: *const u16,
+    options: *const ProfilerRtbOptions,
+    handle_out: *mut u64,
+) -> ProfilerResult {
     if serial.is_null() || handle_out.is_null() {
         return ProfilerResult::InvalidParameter;
     }
@@ -487,6 +517,18 @@ pub extern "C" fn profiler_start_rtb(
     } else {
         unsafe { from_wide_ptr(mode) }
     };
+    let rtb_options = if options.is_null() {
+        default_rtb_options_for_mode(&mode_str)
+    } else {
+        let o = unsafe { &*options };
+        grpc::client::RtbStreamOptions {
+            enable_cpu_loading: o.enable_cpu_loading,
+            enable_cpu_freq: o.enable_cpu_freq,
+            enable_fps_dequeue: o.enable_fps_dequeue,
+            enable_fps_queue: o.enable_fps_queue,
+            enable_fps_present_fence: o.enable_fps_present_fence,
+        }
+    };
     let rt = crate::runtime();
 
     let mut conns = crate::connections().lock();
@@ -495,7 +537,7 @@ pub extern "C" fn profiler_start_rtb(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_rtb_stream(pid, interval_secs, &mode_str)) {
+    match rt.block_on(entry.client.start_rtb_stream(pid, interval_secs, &mode_str, rtb_options)) {
         Ok(stream) => {
             let handle_id = crate::next_rtb_handle_id();
             let handle = grpc::streaming::RtbStreamHandle::start(rt, stream, 512);
@@ -504,7 +546,7 @@ pub extern "C" fn profiler_start_rtb(
             ProfilerResult::Ok
         }
         Err(e) => {
-            log::error!("profiler_start_rtb: {e:#}");
+            log::error!("profiler_start_rtb_ex: {e:#}");
             ProfilerResult::OperationFailed
         }
     }
@@ -564,6 +606,9 @@ pub extern "C" fn profiler_poll_rtb(handle: u64, out: *mut ProfilerRtbData) -> b
             unsafe {
                 (*out).timestamp_ms = dp.timestamp_ms;
                 (*out).fps = dp.fps;
+                (*out).fps_dequeue = dp.fps_dequeue;
+                (*out).fps_queue = dp.fps_queue;
+                (*out).fps_present_fence = dp.fps_present_fence;
                 (*out).power_mw = dp.power_mw;
                 (*out).power_ma = dp.power_ma;
                 (*out).voltage_v = dp.voltage_v;

@@ -49,6 +49,9 @@ pub struct ProfilerTopApp {
 pub struct ProfilerRtbData {
     pub timestamp_ms: u64,
     pub fps: f64,
+    pub fps_dequeue: f64,
+    pub fps_queue: f64,
+    pub fps_present_fence: f64,
     pub power_mw: f64,
     pub power_ma: f64,
     pub voltage_v: f64,
@@ -86,6 +89,16 @@ pub struct ProfilerRtbData {
     pub power_avg_mw: f64,
     /// Nullable UTF-16 process/surface name.
     pub process_name: *mut u16,
+}
+
+/// RTB stream metric selection options (passed from C#).
+#[repr(C)]
+pub struct ProfilerRtbOptions {
+    pub enable_cpu_loading: bool,
+    pub enable_cpu_freq: bool,
+    pub enable_fps_dequeue: bool,
+    pub enable_fps_queue: bool,
+    pub enable_fps_present_fence: bool,
 }
 
 /// Status of a Perfetto trace session.
