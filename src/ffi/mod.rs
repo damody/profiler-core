@@ -471,9 +471,9 @@ fn default_rtb_options_for_mode(mode: &str) -> grpc::client::RtbStreamOptions {
         grpc::client::RtbStreamOptions {
             enable_cpu_loading: false,
             enable_cpu_freq: false,
-            enable_fps_dequeue: true,
+            enable_fps_dequeue: false,
             enable_fps_queue: false,
-            enable_fps_present_fence: false,
+            enable_fps_present_fence: true,
         }
     } else {
         grpc::client::RtbStreamOptions::default()
