@@ -1289,6 +1289,10 @@ pub extern "C" fn profiler_shell(
             }
             Err(e) => {
                 log::error!("profiler_shell: {e:#}");
+                crate::set_last_error(format!(
+                    "profiler_shell failed. command='{}', error={:#}",
+                    command_str, e
+                ));
                 unsafe {
                     (*out).exit_code = -1;
                     (*out).stdout = ptr::null_mut();
@@ -1483,6 +1487,10 @@ pub extern "C" fn profiler_push_file(
             Ok(_) => ProfilerResult::Ok,
             Err(e) => {
                 log::error!("profiler_push_file: {e:#}");
+                crate::set_last_error(format!(
+                    "profiler_push_file failed. local='{}', remote='{}', error={:#}",
+                    local_str, remote_str, e
+                ));
                 ProfilerResult::OperationFailed
             }
         }
