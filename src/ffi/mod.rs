@@ -636,6 +636,7 @@ pub extern "C" fn profiler_poll_rtb(handle: u64, out: *mut ProfilerRtbData) -> b
                 (*out).vcore_v = dp.vcore_v;
                 (*out).wss_kb = dp.wss_kb;
                 (*out).pss_kb = dp.pss_kb;
+                (*out).top_app_rss_kb = dp.top_app_rss_kb;
                 (*out).frame_times_ms = ft_ptr;
                 (*out).frame_times_count = ft_count;
                 (*out).cpu_time_ms = dp.cpu_time_ms;

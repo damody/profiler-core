@@ -81,6 +81,7 @@ pub struct ProfilerRtbData {
     pub vcore_v: f64,
     pub wss_kb: u64,
     pub pss_kb: u64,
+    pub top_app_rss_kb: u64,
     /// Frame times collected during this interval.
     pub frame_times_ms: *mut f32,
     pub frame_times_count: usize,
