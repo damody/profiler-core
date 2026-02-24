@@ -739,12 +739,16 @@ pub extern "C" fn profiler_start_perfetto(
             if resp.success {
                 ProfilerResult::Ok
             } else {
-                log::error!("profiler_start_perfetto: daemon said: {}", resp.message);
+                let msg = format!("perfetto start rejected by daemon: {}", resp.message);
+                log::error!("profiler_start_perfetto: {msg}");
+                crate::set_last_error(&msg);
                 ProfilerResult::OperationFailed
             }
         }
         Err(e) => {
-            log::error!("profiler_start_perfetto: {e:#}");
+            let msg = format!("failed to start perfetto trace via gRPC: {e:#}");
+            log::error!("profiler_start_perfetto: {msg}");
+            crate::set_last_error(&msg);
             ProfilerResult::OperationFailed
         }
     }
