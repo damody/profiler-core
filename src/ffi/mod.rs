@@ -39,6 +39,7 @@ pub extern "C" fn profiler_init() -> ProfilerResult {
         }
     }
 
+    crate::install_crash_hook();
     crate::init_runtime();
     log::info!("profiler_init complete");
     ProfilerResult::Ok

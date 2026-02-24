@@ -60,23 +60,6 @@ pub async fn root(serial: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Run `adb -s <serial> shell su -c '<command>'` for Magisk-rooted devices.
-pub async fn shell_su(serial: &str, command: &str) -> Result<String> {
-    let su_cmd = format!("su -c '{command}'");
-    let output = super::adb_command()
-        .args(["-s", serial, "shell", &su_cmd])
-        .output()
-        .await
-        .context("Failed to execute adb shell su")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("adb shell su failed: {stderr}");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 /// Check whether the current adb shell runs as root (uid=0).
 pub async fn is_root_shell(serial: &str) -> Result<bool> {
     let id_output = shell(serial, "id").await?;

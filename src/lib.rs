@@ -3,14 +3,25 @@ pub mod adb;
 pub mod grpc;
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{Once, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use tokio::runtime::Runtime;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    AddVectoredExceptionHandler, EXCEPTION_POINTERS,
+};
 
 /// Last error message from FFI operations (thread-local would be ideal but
 /// OnceLock<Mutex<>> is consistent with the rest of our global state).
 static LAST_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+static PANIC_HOOK_INIT: Once = Once::new();
+static SEH_HOOK_INIT: Once = Once::new();
+static CRASH_LOG_RESET_INIT: Once = Once::new();
 
 use crate::grpc::client::ProfilerClient;
 use crate::grpc::streaming::{RtbStreamHandle, CrStreamHandle, TcStreamHandle, CmlStreamHandle};
@@ -194,11 +205,147 @@ pub fn next_cml_handle_id() -> u64 {
     id
 }
 
+fn crash_log_path() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            return parent.join("crash.log");
+        }
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("crash.log")
+}
+
+fn append_crash_log_internal(kind: &str, detail: &str) {
+    let path = crash_log_path();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "[{ts}] {kind}");
+        let _ = writeln!(file, "{detail}");
+        let _ = writeln!(file);
+    }
+}
+
+fn append_crash_log(kind: &str, detail: &str) {
+    append_crash_log_internal(kind, detail);
+}
+
+fn reset_crash_log_for_current_run() {
+    CRASH_LOG_RESET_INIT.call_once(|| {
+        let path = crash_log_path();
+        let _ = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path);
+    });
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn vectored_exception_handler(
+    exception_info: *mut EXCEPTION_POINTERS,
+) -> i32 {
+    if exception_info.is_null() {
+        return 0;
+    }
+    let record = unsafe { (*exception_info).ExceptionRecord };
+    if record.is_null() {
+        return 0;
+    }
+
+    let code = unsafe { (*record).ExceptionCode as u32 };
+    let should_log = matches!(
+        code,
+        0xC0000094 | // integer divide by zero
+        0xC0000005 | // access violation
+        0xC0000409 | // stack buffer overrun / fast fail
+        0xC000001D | // illegal instruction
+        0xC00000FD | // stack overflow
+        0x80000003   // breakpoint
+    );
+    if !should_log {
+        return 0;
+    }
+    let flags = unsafe { (*record).ExceptionFlags as u32 };
+    let address = unsafe { (*record).ExceptionAddress as usize };
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    let detail = format!(
+        "code: 0x{code:08X}\nflags: 0x{flags:08X}\naddress: 0x{address:016X}\nbacktrace:\n{backtrace}"
+    );
+    append_crash_log("windows seh exception", &detail);
+
+    0
+}
+
+#[cfg(target_os = "windows")]
+fn install_windows_seh_hook() {
+    SEH_HOOK_INIT.call_once(|| unsafe {
+        let handle = AddVectoredExceptionHandler(1, Some(vectored_exception_handler));
+        if handle.is_null() {
+            append_crash_log_internal(
+                "crash hook init",
+                "AddVectoredExceptionHandler install failed",
+            );
+        } else {
+            append_crash_log_internal(
+                "crash hook init",
+                "AddVectoredExceptionHandler installed",
+            );
+        }
+    });
+}
+
+pub fn install_crash_hook() {
+    reset_crash_log_for_current_run();
+
+    PANIC_HOOK_INIT.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic payload".to_string()
+            };
+            let location = info
+                .location()
+                .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            let thread_name = std::thread::current()
+                .name()
+                .unwrap_or("unnamed")
+                .to_string();
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let detail = format!(
+                "thread: {thread_name}\nlocation: {location}\npayload: {payload}\nbacktrace:\n{backtrace}"
+            );
+
+            append_crash_log("rust panic", &detail);
+
+            if let Some(err) = LAST_ERROR.get() {
+                *err.lock() = format!("Rust panic at {location}: {payload}");
+            }
+
+            prev(info);
+        }));
+    });
+
+    #[cfg(target_os = "windows")]
+    install_windows_seh_hook();
+}
+
 /// Store an error message that can be retrieved by C# via `profiler_get_last_error`.
 pub fn set_last_error(msg: impl Into<String>) {
+    let msg = msg.into();
     if let Some(err) = LAST_ERROR.get() {
-        *err.lock() = msg.into();
+        *err.lock() = msg.clone();
     }
+    append_crash_log("rust error", &msg);
 }
 
 /// Take the last error message (returns empty string if none).

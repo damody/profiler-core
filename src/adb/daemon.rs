@@ -8,8 +8,6 @@ use super::commands;
 enum RootMode {
     /// `adb root` succeeded — adbd is running as root.
     Adb,
-    /// `su` is available (e.g. Magisk).
-    Su,
     /// No root available — best effort.
     None,
 }
@@ -31,17 +29,6 @@ async fn ensure_root_and_permissive(serial: &str) -> RootMode {
         // SELinux permissive
         let _ = commands::shell(serial, "setenforce 0").await;
         return RootMode::Adb;
-    }
-
-    // --- Fallback: try `su` (Magisk / KernelSU) ---
-    match commands::shell_su(serial, "id").await {
-        Ok(id_out) if id_out.contains("uid=0") => {
-            log::info!("[{serial}] root mode: su");
-            let _ = commands::shell_su(serial, "setenforce 0").await;
-            return RootMode::Su;
-        }
-        Ok(id_out) => log::warn!("[{serial}] su returned non-root id: {id_out}"),
-        Err(e) => log::warn!("[{serial}] su not available: {e:#}"),
     }
 
     log::warn!("[{serial}] root mode: none — daemon may not read sysfs nodes");
@@ -103,10 +90,6 @@ async fn start_daemon(serial: &str, remote_path: &str, grpc_port: u16) -> Result
         RootMode::Adb => {
             // adbd is root — env var must precede nohup for shell to parse it
             format!("{ld_env} nohup {daemon_args} > /dev/null 2>&1 &")
-        }
-        RootMode::Su => {
-            // su -c passes string to a shell, so env var assignment works inside quotes
-            format!("nohup su -c '{ld_env} {daemon_args}' > /dev/null 2>&1 &")
         }
         RootMode::None => {
             format!("{ld_env} nohup {daemon_args} > /dev/null 2>&1 &")
