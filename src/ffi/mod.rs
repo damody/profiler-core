@@ -240,24 +240,21 @@ pub extern "C" fn profiler_deploy_and_connect(
         return ProfilerResult::DeviceNotFound;
     }
 
-    // Deploy + start if daemon is not running
-    if !rt.block_on(adb::daemon::is_running(&serial_str)) {
-        log::info!("Daemon not running on {serial_str}, deploying...");
-        if let Err(e) = rt.block_on(adb::daemon::deploy_and_start(
-            &serial_str,
-            &local_str,
-            &remote_str,
-            port,
-        )) {
-            log::error!("profiler_deploy_and_connect: deploy failed: {e:#}");
-            return ProfilerResult::OperationFailed;
-        }
+    // Ensure daemon is running as root. Restart if existing daemon is non-root.
+    if let Err(e) = rt.block_on(adb::daemon::ensure_running_rooted(
+        &serial_str,
+        &local_str,
+        &remote_str,
+        port,
+    )) {
+        log::error!("profiler_deploy_and_connect: ensure_running_rooted failed: {e:#}");
+        return ProfilerResult::OperationFailed;
+    }
 
-        // Verify it started
-        if !rt.block_on(adb::daemon::is_running(&serial_str)) {
-            log::error!("profiler_deploy_and_connect: daemon did not stay alive");
-            return ProfilerResult::DaemonNotRunning;
-        }
+    // Verify daemon is alive after ensure/restart.
+    if !rt.block_on(adb::daemon::is_running(&serial_str)) {
+        log::error!("profiler_deploy_and_connect: daemon did not stay alive");
+        return ProfilerResult::DaemonNotRunning;
     }
 
     // Port forwarding (local port → device port)

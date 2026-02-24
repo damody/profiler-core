@@ -172,6 +172,65 @@ pub async fn is_running(serial: &str) -> bool {
     }
 }
 
+/// Return the daemon PID if `realtime_profile` is running.
+pub async fn get_daemon_pid(serial: &str) -> Option<i32> {
+    let pid_str = commands::shell(serial, "pidof realtime_profile").await.ok()?;
+    pid_str
+        .trim()
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<i32>().ok())
+}
+
+/// Return daemon uid (effective uid field in `/proc/<pid>/status`), if available.
+pub async fn get_daemon_uid(serial: &str) -> Option<u32> {
+    let pid = get_daemon_pid(serial).await?;
+    let status = commands::shell(serial, &format!("cat /proc/{pid}/status")).await.ok()?;
+    for line in status.lines() {
+        if line.starts_with("Uid:") {
+            // Format: Uid:\tReal\tEffective\tSavedSet\tFilesystem
+            let mut parts = line.split_whitespace();
+            let _label = parts.next();
+            if let Some(effective_uid) = parts.next() {
+                return effective_uid.parse::<u32>().ok();
+            }
+        }
+    }
+    None
+}
+
+/// Ensure daemon is running as root. If a non-root daemon exists, restart it.
+pub async fn ensure_running_rooted(
+    serial: &str,
+    local_path: &str,
+    remote_path: &str,
+    grpc_port: u16,
+) -> Result<()> {
+    if !is_running(serial).await {
+        log::info!("[{serial}] daemon 未運行，啟動中...");
+        return deploy_and_start(serial, local_path, remote_path, grpc_port).await;
+    }
+
+    match get_daemon_uid(serial).await {
+        Some(0) => {
+            log::info!("[{serial}] daemon 已為 root，沿用現有進程");
+            Ok(())
+        }
+        Some(uid) => {
+            log::warn!("[{serial}] daemon uid={uid} (非 root)，重啟為 root...");
+            let _ = commands::shell(serial, "pkill -f realtime_profile").await;
+            sleep(Duration::from_millis(500)).await;
+            deploy_and_start(serial, local_path, remote_path, grpc_port).await
+        }
+        None => {
+            log::warn!("[{serial}] 無法判斷 daemon uid，保守重啟為 root...");
+            let _ = commands::shell(serial, "pkill -f realtime_profile").await;
+            sleep(Duration::from_millis(500)).await;
+            deploy_and_start(serial, local_path, remote_path, grpc_port).await
+        }
+    }
+}
+
 /// Query the gRPC port that the running daemon is actually listening on.
 ///
 /// Reads `/proc/<pid>/cmdline` and looks for the `--grpc-port` argument.
