@@ -9,6 +9,7 @@ use crate::proto::RtbDataPoint;
 use crate::proto::CrDataPoint;
 use crate::proto::TcDataPoint;
 use crate::proto::CmlDataPoint;
+use crate::proto::GcDataPoint;
 
 /// A handle to an active RTB gRPC stream.
 ///
@@ -362,6 +363,91 @@ impl CmlStreamHandle {
     /// (benchmark complete or error).
     pub fn is_finished(&self) -> bool {
         self.finished.load(Ordering::Acquire)
+    }
+
+    /// Cancel the background stream task.
+    pub fn cancel(self) {
+        self.cancel.cancel();
+    }
+}
+
+/// A handle to an active GC (GPU Counters) gRPC stream.
+///
+/// Data points are pushed into a bounded lock-free queue by a background
+/// tokio task.  The FFI layer polls the queue non-blocking.
+pub struct GcStreamHandle {
+    queue: Arc<ArrayQueue<GcDataPoint>>,
+    cancel: CancellationToken,
+    _task: JoinHandle<()>,
+}
+
+impl GcStreamHandle {
+    /// Spawn a background task that reads from the gRPC stream and pushes
+    /// data points into the internal queue.
+    pub fn start(
+        rt: &Runtime,
+        mut stream: tonic::Streaming<GcDataPoint>,
+        capacity: usize,
+    ) -> Self {
+        let queue = Arc::new(ArrayQueue::new(capacity));
+        let cancel = CancellationToken::new();
+
+        let q = queue.clone();
+        let ct = cancel.clone();
+        let count = Arc::new(AtomicU64::new(0));
+        let cnt = count.clone();
+
+        let task = rt.spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = ct.cancelled() => {
+                        log::info!("GC stream cancelled");
+                        break;
+                    }
+                    result = stream.message() => {
+                        match result {
+                            Ok(Some(dp)) => {
+                                let n = cnt.fetch_add(1, Ordering::Relaxed);
+                                if n < 3 {
+                                    log::info!(
+                                        "GC recv #{}: ts={} counters={}",
+                                        n, dp.timestamp_ms, dp.counters.len()
+                                    );
+                                }
+
+                                match q.push(dp) {
+                                    Ok(()) => {}
+                                    Err(rejected) => {
+                                        let _ = q.pop();
+                                        let _ = q.push(rejected);
+                                        log::trace!("GC queue full, dropped oldest sample");
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                log::info!("GC stream ended (server closed)");
+                                break;
+                            }
+                            Err(e) => {
+                                log::error!("GC stream error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            queue,
+            cancel,
+            _task: task,
+        }
+    }
+
+    /// Non-blocking poll: returns the next data point if available.
+    pub fn poll(&self) -> Option<GcDataPoint> {
+        self.queue.pop()
     }
 
     /// Cancel the background stream task.

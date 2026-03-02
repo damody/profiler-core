@@ -5,7 +5,8 @@ use tonic::transport::Channel;
 use crate::proto::profiler_service_client::ProfilerServiceClient;
 use crate::proto::{
     ChmodRequest, ChownRequest, CmlStreamRequest, CrStreamRequest, CreateArchiveRequest,
-    DevicePropRequest, Empty, ExtractArchiveRequest, FileUploadChunk, GetFileOwnerRequest,
+    DevicePropRequest, Empty, ExtractArchiveRequest, FileUploadChunk, GcDiscoverRequest,
+    GcStreamRequest, GetFileOwnerRequest,
     GetPidRequest, GetSurfaceNamesRequest, InputKeyEventRequest, InputSwipeRequest,
     InputTapRequest, InputTextRequest, InstallApkRequest, ListPackagesRequest, PackageRequest,
     PathExistsRequest, PerfettoRequest, PerfettoResponse, PullFileRequest, RemoveFileRequest,
@@ -851,5 +852,41 @@ impl ProfilerClient {
             .context("GetFileOwner RPC failed")?
             .into_inner();
         Ok(resp.uid)
+    }
+
+    // =========================================================================
+    // GPU Counters
+    // =========================================================================
+
+    /// Discover Mali GPUs and available counters on the device.
+    pub async fn discover_gpu_counters(
+        &mut self,
+    ) -> Result<crate::proto::GcDiscoverResponse> {
+        let resp = self
+            .inner
+            .discover_gpu_counters(GcDiscoverRequest {})
+            .await
+            .context("DiscoverGpuCounters RPC failed")?
+            .into_inner();
+        Ok(resp)
+    }
+
+    /// Start a GPU Counters stream and return the tonic streaming response.
+    pub async fn start_gc_stream(
+        &mut self,
+        gpu_device_number: u32,
+        interval_secs: f64,
+        counter_ids: &[u32],
+    ) -> Result<tonic::Streaming<crate::proto::GcDataPoint>> {
+        let resp = self
+            .inner
+            .start_gc_stream(GcStreamRequest {
+                gpu_device_number,
+                interval_secs,
+                counter_ids: counter_ids.to_vec(),
+            })
+            .await
+            .context("StartGcStream RPC failed")?;
+        Ok(resp.into_inner())
     }
 }

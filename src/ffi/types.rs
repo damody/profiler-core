@@ -314,3 +314,54 @@ pub struct ProfilerCmlData {
     pub cpus_count: usize,
     pub is_finished: bool,
 }
+
+// ---------------------------------------------------------------------------
+// GPU Counters (GC) types
+// ---------------------------------------------------------------------------
+
+/// GPU information from HWCPipe discovery.
+#[repr(C)]
+pub struct ProfilerGpuInfo {
+    pub device_number: u32,
+    // 4 bytes padding (pointer alignment)
+    pub gpu_family: *mut u16,    // UTF-16 null-terminated
+    pub num_shader_cores: u32,
+    pub num_exec_engines: u32,
+    pub bus_width: u32,
+    // 4 bytes padding (u64 alignment)
+    pub product_id: u64,
+}
+
+/// GPU counter info from HWCPipe discovery.
+#[repr(C)]
+pub struct ProfilerGpuCounterInfo {
+    pub counter_id: u32,
+    // 4 bytes padding (pointer alignment)
+    pub name: *mut u16,          // UTF-16 null-terminated
+    pub units: *mut u16,         // UTF-16 null-terminated
+}
+
+/// Discovery result containing GPU info and available counters.
+#[repr(C)]
+pub struct ProfilerGcDiscoverResult {
+    pub gpus: *mut ProfilerGpuInfo,
+    pub gpus_count: usize,
+    pub counters: *mut ProfilerGpuCounterInfo,
+    pub counters_count: usize,
+}
+
+/// A single counter value in a GC data point.
+#[repr(C)]
+pub struct ProfilerGcCounterValue {
+    pub counter_id: u32,
+    // 4 bytes padding (f64 alignment)
+    pub value: f64,
+}
+
+/// A single GPU Counters data point (one timestamp, multiple counter values).
+#[repr(C)]
+pub struct ProfilerGcData {
+    pub timestamp_ms: u64,
+    pub counters: *mut ProfilerGcCounterValue,
+    pub counters_count: usize,
+}

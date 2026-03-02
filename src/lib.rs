@@ -24,7 +24,7 @@ static SEH_HOOK_INIT: Once = Once::new();
 static CRASH_LOG_RESET_INIT: Once = Once::new();
 
 use crate::grpc::client::ProfilerClient;
-use crate::grpc::streaming::{RtbStreamHandle, CrStreamHandle, TcStreamHandle, CmlStreamHandle};
+use crate::grpc::streaming::{RtbStreamHandle, CrStreamHandle, TcStreamHandle, CmlStreamHandle, GcStreamHandle};
 
 /// Global tokio runtime, lazily initialized via `init_runtime()`.
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -56,6 +56,12 @@ static CML_HANDLES: OnceLock<Mutex<HashMap<u64, CmlStreamHandle>>> = OnceLock::n
 /// Counter for generating unique CML handle ids.
 static NEXT_CML_HANDLE: OnceLock<Mutex<u64>> = OnceLock::new();
 
+/// Active GC (GPU Counters) stream handles keyed by handle id.
+static GC_HANDLES: OnceLock<Mutex<HashMap<u64, GcStreamHandle>>> = OnceLock::new();
+
+/// Counter for generating unique GC handle ids.
+static NEXT_GC_HANDLE: OnceLock<Mutex<u64>> = OnceLock::new();
+
 /// An active connection to a device's realtime_profile daemon.
 pub struct ConnectionEntry {
     pub serial: String,
@@ -81,6 +87,8 @@ pub fn init_runtime() -> bool {
     let _ = NEXT_TC_HANDLE.set(Mutex::new(1));
     let _ = CML_HANDLES.set(Mutex::new(HashMap::new()));
     let _ = NEXT_CML_HANDLE.set(Mutex::new(1));
+    let _ = GC_HANDLES.set(Mutex::new(HashMap::new()));
+    let _ = NEXT_GC_HANDLE.set(Mutex::new(1));
     let _ = LAST_ERROR.set(Mutex::new(String::new()));
 
     if created {
@@ -119,6 +127,14 @@ pub fn shutdown_runtime() {
 
     // Drop all CML handles (cancels streams)
     if let Some(handles) = CML_HANDLES.get() {
+        let mut map = handles.lock();
+        for (_id, handle) in map.drain() {
+            handle.cancel();
+        }
+    }
+
+    // Drop all GC handles (cancels streams)
+    if let Some(handles) = GC_HANDLES.get() {
         let mut map = handles.lock();
         for (_id, handle) in map.drain() {
             handle.cancel();
@@ -199,6 +215,20 @@ pub fn cml_handles() -> &'static Mutex<HashMap<u64, CmlStreamHandle>> {
 /// Allocate a new unique CML handle id.
 pub fn next_cml_handle_id() -> u64 {
     let counter = NEXT_CML_HANDLE.get().expect("Runtime not initialized");
+    let mut val = counter.lock();
+    let id = *val;
+    *val += 1;
+    id
+}
+
+/// Get the GC handles map.
+pub fn gc_handles() -> &'static Mutex<HashMap<u64, GcStreamHandle>> {
+    GC_HANDLES.get().expect("Runtime not initialized")
+}
+
+/// Allocate a new unique GC handle id.
+pub fn next_gc_handle_id() -> u64 {
+    let counter = NEXT_GC_HANDLE.get().expect("Runtime not initialized");
     let mut val = counter.lock();
     let id = *val;
     *val += 1;

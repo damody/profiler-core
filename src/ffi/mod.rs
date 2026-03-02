@@ -2530,3 +2530,234 @@ pub extern "C" fn profiler_cml_is_finished(handle: u64) -> bool {
         None => true,
     }
 }
+
+// ---------------------------------------------------------------------------
+// GPU Counters (GC) streaming
+// ---------------------------------------------------------------------------
+
+/// Discover Mali GPUs and available counters on the device.
+///
+/// On success, populates `out` with GPU info and counter lists.
+/// Call `profiler_free_gc_discover` to release the returned data.
+#[no_mangle]
+pub extern "C" fn profiler_discover_gpu_counters(
+    serial: *const u16,
+    out: *mut ProfilerGcDiscoverResult,
+) -> ProfilerResult {
+    if serial.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let rt = crate::runtime();
+
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+
+    match rt.block_on(entry.client.discover_gpu_counters()) {
+        Ok(resp) => {
+            // Convert GPUs
+            let gpu_count = resp.gpus.len();
+            let gpus_ptr = if gpu_count > 0 {
+                let mut ffi_gpus: Vec<ProfilerGpuInfo> = resp
+                    .gpus
+                    .iter()
+                    .map(|g| ProfilerGpuInfo {
+                        device_number: g.device_number,
+                        gpu_family: to_wide_ptr(&g.gpu_family),
+                        num_shader_cores: g.num_shader_cores,
+                        num_exec_engines: g.num_execution_engines,
+                        bus_width: g.bus_width,
+                        product_id: g.product_id,
+                    })
+                    .collect();
+                let p = ffi_gpus.as_mut_ptr();
+                std::mem::forget(ffi_gpus);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            // Convert counters
+            let counter_count = resp.available_counters.len();
+            let counters_ptr = if counter_count > 0 {
+                let mut ffi_counters: Vec<ProfilerGpuCounterInfo> = resp
+                    .available_counters
+                    .iter()
+                    .map(|c| ProfilerGpuCounterInfo {
+                        counter_id: c.counter_id,
+                        name: to_wide_ptr(&c.name),
+                        units: to_wide_ptr(&c.units),
+                    })
+                    .collect();
+                let p = ffi_counters.as_mut_ptr();
+                std::mem::forget(ffi_counters);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            unsafe {
+                (*out).gpus = gpus_ptr;
+                (*out).gpus_count = gpu_count;
+                (*out).counters = counters_ptr;
+                (*out).counters_count = counter_count;
+            }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            log::error!("profiler_discover_gpu_counters: {e:#}");
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Free the data returned by `profiler_discover_gpu_counters`.
+#[no_mangle]
+pub extern "C" fn profiler_free_gc_discover(data: *mut ProfilerGcDiscoverResult) {
+    if data.is_null() {
+        return;
+    }
+    unsafe {
+        let gpus_ptr = (*data).gpus;
+        let gpus_count = (*data).gpus_count;
+        if !gpus_ptr.is_null() && gpus_count > 0 {
+            let gpus = Vec::from_raw_parts(gpus_ptr, gpus_count, gpus_count);
+            for g in gpus {
+                free_wide_ptr(g.gpu_family);
+            }
+        }
+        (*data).gpus = ptr::null_mut();
+        (*data).gpus_count = 0;
+
+        let counters_ptr = (*data).counters;
+        let counters_count = (*data).counters_count;
+        if !counters_ptr.is_null() && counters_count > 0 {
+            let counters = Vec::from_raw_parts(counters_ptr, counters_count, counters_count);
+            for c in counters {
+                free_wide_ptr(c.name);
+                free_wide_ptr(c.units);
+            }
+        }
+        (*data).counters = ptr::null_mut();
+        (*data).counters_count = 0;
+    }
+}
+
+/// Start a GPU Counters stream.
+///
+/// On success, `handle_out` receives an opaque handle id.  Use
+/// `profiler_poll_gc` to read data and `profiler_stop_gc` to stop.
+#[no_mangle]
+pub extern "C" fn profiler_start_gc(
+    serial: *const u16,
+    gpu_device_number: u32,
+    interval_secs: f64,
+    counter_ids: *const u32,
+    counter_ids_count: usize,
+    handle_out: *mut u64,
+) -> ProfilerResult {
+    if serial.is_null() || handle_out.is_null() || counter_ids.is_null() || counter_ids_count == 0 {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let ids = unsafe { std::slice::from_raw_parts(counter_ids, counter_ids_count) };
+    let rt = crate::runtime();
+
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+
+    match rt.block_on(entry.client.start_gc_stream(gpu_device_number, interval_secs, ids)) {
+        Ok(stream) => {
+            let handle_id = crate::next_gc_handle_id();
+            let handle = grpc::streaming::GcStreamHandle::start(rt, stream, 512);
+            crate::gc_handles().lock().insert(handle_id, handle);
+            unsafe { *handle_out = handle_id; }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            log::error!("profiler_start_gc: {e:#}");
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Non-blocking poll for the next GC data point.
+///
+/// Returns `true` if data was available and `out` was populated.
+/// Returns `false` if no data is available yet.
+#[no_mangle]
+pub extern "C" fn profiler_poll_gc(handle: u64, out: *mut ProfilerGcData) -> bool {
+    if out.is_null() {
+        return false;
+    }
+
+    let handles = crate::gc_handles().lock();
+    let h = match handles.get(&handle) {
+        Some(h) => h,
+        None => return false,
+    };
+
+    match h.poll() {
+        Some(dp) => {
+            let count = dp.counters.len();
+            let counters_ptr = if count > 0 {
+                let mut ffi_counters: Vec<ProfilerGcCounterValue> = dp
+                    .counters
+                    .iter()
+                    .map(|c| ProfilerGcCounterValue {
+                        counter_id: c.counter_id,
+                        value: c.value,
+                    })
+                    .collect();
+                let p = ffi_counters.as_mut_ptr();
+                std::mem::forget(ffi_counters);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            unsafe {
+                (*out).timestamp_ms = dp.timestamp_ms;
+                (*out).counters = counters_ptr;
+                (*out).counters_count = count;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Stop a GC stream and release the handle.
+#[no_mangle]
+pub extern "C" fn profiler_stop_gc(handle: u64) -> ProfilerResult {
+    match crate::gc_handles().lock().remove(&handle) {
+        Some(h) => {
+            h.cancel();
+            ProfilerResult::Ok
+        }
+        None => ProfilerResult::InvalidParameter,
+    }
+}
+
+/// Free the dynamic arrays inside a `ProfilerGcData`.
+#[no_mangle]
+pub extern "C" fn profiler_free_gc_data(data: *mut ProfilerGcData) {
+    if data.is_null() {
+        return;
+    }
+    unsafe {
+        let counters_ptr = (*data).counters;
+        let counters_count = (*data).counters_count;
+        if !counters_ptr.is_null() && counters_count > 0 {
+            drop(Vec::from_raw_parts(counters_ptr, counters_count, counters_count));
+        }
+        (*data).counters = ptr::null_mut();
+        (*data).counters_count = 0;
+    }
+}
