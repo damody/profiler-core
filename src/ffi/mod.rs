@@ -472,6 +472,7 @@ fn default_rtb_options_for_mode(mode: &str) -> grpc::client::RtbStreamOptions {
             enable_fps_dequeue: false,
             enable_fps_queue: false,
             enable_fps_present_fence: true,
+            enable_gpu: false,
         }
     } else {
         grpc::client::RtbStreamOptions::default()
@@ -525,6 +526,7 @@ pub extern "C" fn profiler_start_rtb_ex(
             enable_fps_dequeue: o.enable_fps_dequeue,
             enable_fps_queue: o.enable_fps_queue,
             enable_fps_present_fence: o.enable_fps_present_fence,
+            enable_gpu: o.enable_gpu,
         }
     };
     let rt = crate::runtime();
@@ -1708,6 +1710,17 @@ pub extern "C" fn profiler_get_rtb_summary(
                     .map(|ts| thread_snapshot_to_ffi(ts))
                     .unwrap_or_else(empty_thread_snapshot);
 
+                // Convert frame_times_ms
+                let ft_count = summary.frame_times_ms.len();
+                let ft_ptr = if ft_count > 0 {
+                    let mut ft_vec = summary.frame_times_ms.clone();
+                    let p = ft_vec.as_mut_ptr();
+                    std::mem::forget(ft_vec);
+                    p
+                } else {
+                    ptr::null_mut()
+                };
+
                 unsafe {
                     (*out).top_threads = threads_ptr;
                     (*out).top_threads_count = threads_count;
@@ -1718,6 +1731,8 @@ pub extern "C" fn profiler_get_rtb_summary(
                     (*out).rhi_thread = rhi;
                     (*out).start_temp = summary.start_temp;
                     (*out).end_temp = summary.end_temp;
+                    (*out).frame_times_ms = ft_ptr;
+                    (*out).frame_times_count = ft_count;
                 }
                 ProfilerResult::Ok
             }
@@ -1776,6 +1791,15 @@ pub extern "C" fn profiler_free_rtb_summary(summary: *mut ProfilerRtbSummary) {
         free_thread_snapshot(&mut (*summary).logical_thread);
         free_thread_snapshot(&mut (*summary).render_thread);
         free_thread_snapshot(&mut (*summary).rhi_thread);
+
+        // Free frame_times_ms
+        let ft_ptr = (*summary).frame_times_ms;
+        let ft_count = (*summary).frame_times_count;
+        if !ft_ptr.is_null() && ft_count > 0 {
+            drop(Vec::from_raw_parts(ft_ptr, ft_count, ft_count));
+        }
+        (*summary).frame_times_ms = ptr::null_mut();
+        (*summary).frame_times_count = 0;
     }
 }
 

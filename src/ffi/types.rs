@@ -100,6 +100,7 @@ pub struct ProfilerRtbOptions {
     pub enable_fps_dequeue: bool,
     pub enable_fps_queue: bool,
     pub enable_fps_present_fence: bool,
+    pub enable_gpu: bool,
 }
 
 /// Status of a Perfetto trace session.
@@ -254,6 +255,8 @@ pub struct ProfilerRtbSummary {
     pub rhi_thread: ProfilerThreadSnapshot,
     pub start_temp: f64,
     pub end_temp: f64,
+    pub frame_times_ms: *mut f32,
+    pub frame_times_count: usize,
 }
 
 // ---------------------------------------------------------------------------

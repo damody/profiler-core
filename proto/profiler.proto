@@ -97,6 +97,7 @@ message RtbSummary {
   ThreadSnapshot rhi_thread = 12;
   double start_temp = 20;
   double end_temp = 21;
+  repeated float frame_times_ms = 30;
 }
 
 message PerfettoRequest {
