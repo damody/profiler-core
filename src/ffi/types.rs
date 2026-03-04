@@ -90,6 +90,8 @@ pub struct ProfilerRtbData {
     pub power_avg_mw: f64,
     /// Nullable UTF-16 process/surface name.
     pub process_name: *mut u16,
+    pub mem_total_kb: u64,
+    pub mem_available_kb: u64,
 }
 
 /// RTB stream metric selection options (passed from C#).

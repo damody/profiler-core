@@ -647,6 +647,8 @@ pub extern "C" fn profiler_poll_rtb(handle: u64, out: *mut ProfilerRtbData) -> b
                 } else {
                     to_wide_ptr(&dp.process_name)
                 };
+                (*out).mem_total_kb = dp.mem_total_kb;
+                (*out).mem_available_kb = dp.mem_available_kb;
             }
             true
         }
