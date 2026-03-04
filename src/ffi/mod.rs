@@ -1723,6 +1723,26 @@ pub extern "C" fn profiler_get_rtb_summary(
                     ptr::null_mut()
                 };
 
+                // Convert vsync_sf_buckets
+                let vsb_count = summary.vsync_sf_buckets.len();
+                let mut ffi_vsb: Vec<ProfilerVsyncSfBucket> = summary
+                    .vsync_sf_buckets
+                    .iter()
+                    .map(|b| ProfilerVsyncSfBucket {
+                        multiple: b.multiple,
+                        center_ms: b.center_ms,
+                        count: b.count,
+                        percentage: b.percentage,
+                    })
+                    .collect();
+                let vsb_ptr = if vsb_count > 0 {
+                    let p = ffi_vsb.as_mut_ptr();
+                    std::mem::forget(ffi_vsb);
+                    p
+                } else {
+                    ptr::null_mut()
+                };
+
                 unsafe {
                     (*out).top_threads = threads_ptr;
                     (*out).top_threads_count = threads_count;
@@ -1735,6 +1755,9 @@ pub extern "C" fn profiler_get_rtb_summary(
                     (*out).end_temp = summary.end_temp;
                     (*out).frame_times_ms = ft_ptr;
                     (*out).frame_times_count = ft_count;
+                    (*out).vsync_sf_buckets = vsb_ptr;
+                    (*out).vsync_sf_buckets_count = vsb_count;
+                    (*out).vsync_sf_base_interval_ms = summary.vsync_sf_base_interval_ms;
                 }
                 ProfilerResult::Ok
             }
@@ -1802,6 +1825,15 @@ pub extern "C" fn profiler_free_rtb_summary(summary: *mut ProfilerRtbSummary) {
         }
         (*summary).frame_times_ms = ptr::null_mut();
         (*summary).frame_times_count = 0;
+
+        // Free vsync_sf_buckets
+        let vsb_ptr = (*summary).vsync_sf_buckets;
+        let vsb_count = (*summary).vsync_sf_buckets_count;
+        if !vsb_ptr.is_null() && vsb_count > 0 {
+            drop(Vec::from_raw_parts(vsb_ptr, vsb_count, vsb_count));
+        }
+        (*summary).vsync_sf_buckets = ptr::null_mut();
+        (*summary).vsync_sf_buckets_count = 0;
     }
 }
 

@@ -245,6 +245,15 @@ pub struct ProfilerCrData {
     pub include_cpus_count: usize,
 }
 
+/// VSYNC-sf interval distribution bucket.
+#[repr(C)]
+pub struct ProfilerVsyncSfBucket {
+    pub multiple: i32,
+    pub center_ms: f64,
+    pub count: i32,
+    pub percentage: f64,
+}
+
 /// RTB summary containing post-recording statistics.
 #[repr(C)]
 pub struct ProfilerRtbSummary {
@@ -259,6 +268,9 @@ pub struct ProfilerRtbSummary {
     pub end_temp: f64,
     pub frame_times_ms: *mut f32,
     pub frame_times_count: usize,
+    pub vsync_sf_buckets: *mut ProfilerVsyncSfBucket,
+    pub vsync_sf_buckets_count: usize,
+    pub vsync_sf_base_interval_ms: f64,
 }
 
 // ---------------------------------------------------------------------------
