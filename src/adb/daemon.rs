@@ -8,6 +8,8 @@ use super::commands;
 enum RootMode {
     /// `adb root` succeeded — adbd is running as root.
     Adb,
+    /// `adb root` failed but `su` is available — commands need `su -c` wrapping.
+    Su,
     /// No root available — best effort.
     None,
 }
@@ -29,6 +31,16 @@ async fn ensure_root_and_permissive(serial: &str) -> RootMode {
         // SELinux permissive
         let _ = commands::shell(serial, "setenforce 0").await;
         return RootMode::Adb;
+    }
+
+    // --- Fallback: try `su` (e.g. Magisk on Qualcomm devices) ---
+    log::info!("[{serial}] adb root 不可用，嘗試 su fallback...");
+    if let Ok(id_output) = commands::shell(serial, "su -c id").await {
+        if id_output.contains("uid=0") {
+            log::info!("[{serial}] root mode: su (su -c id 成功)");
+            let _ = commands::shell(serial, "su -c setenforce 0").await;
+            return RootMode::Su;
+        }
     }
 
     log::warn!("[{serial}] root mode: none — daemon may not read sysfs nodes");
@@ -72,12 +84,17 @@ async fn start_daemon(serial: &str, remote_path: &str, grpc_port: u16) -> Result
         .await
         .context("Failed to chmod realtime_profile")?;
 
+    // Ensure root + SELinux permissive (before kill, so we know if su is needed)
+    let root_mode = ensure_root_and_permissive(serial).await;
+
     // Kill any existing instance
     let _ = commands::shell(serial, "pkill -f realtime_profile").await;
+    // If a root daemon is running and we're non-root shell, pkill may fail — try su
+    if root_mode == RootMode::Su && is_running(serial).await {
+        log::info!("[{serial}] pkill 未能殺掉 root daemon，使用 su -c pkill");
+        let _ = commands::shell(serial, "su -c \"pkill -f realtime_profile\"").await;
+    }
     sleep(Duration::from_millis(500)).await;
-
-    // Ensure root + SELinux permissive
-    let root_mode = ensure_root_and_permissive(serial).await;
 
     // Start in background (with root if available)
     let remote_dir = remote_path
@@ -87,12 +104,15 @@ async fn start_daemon(serial: &str, remote_path: &str, grpc_port: u16) -> Result
     let ld_env = format!("LD_LIBRARY_PATH={remote_dir}");
     let daemon_args = format!("{remote_path} --daemon --grpc-port {grpc_port}");
     let start_cmd = match root_mode {
-        RootMode::Adb => {
-            // adbd is root — env var must precede nohup for shell to parse it
+        RootMode::Adb | RootMode::None => {
+            // adbd is root (Adb) or no root available (None) — run directly
             format!("{ld_env} nohup {daemon_args} > /dev/null 2>&1 &")
         }
-        RootMode::None => {
-            format!("{ld_env} nohup {daemon_args} > /dev/null 2>&1 &")
+        RootMode::Su => {
+            // su available — wrap the entire command in su -c
+            format!(
+                "su -c \"{ld_env} nohup {daemon_args} > /dev/null 2>&1 &\""
+            )
         }
     };
 
@@ -182,6 +202,16 @@ pub async fn get_daemon_uid(serial: &str) -> Option<u32> {
     None
 }
 
+/// Kill the daemon, using `su -c pkill` as fallback if regular pkill fails.
+async fn kill_daemon(serial: &str) {
+    let _ = commands::shell(serial, "pkill -f realtime_profile").await;
+    if is_running(serial).await {
+        log::info!("[{serial}] pkill 未能殺掉 daemon，嘗試 su -c pkill");
+        let _ = commands::shell(serial, "su -c \"pkill -f realtime_profile\"").await;
+    }
+    sleep(Duration::from_millis(500)).await;
+}
+
 /// Ensure daemon is running as root. If a non-root daemon exists, restart it.
 pub async fn ensure_running_rooted(
     serial: &str,
@@ -201,14 +231,12 @@ pub async fn ensure_running_rooted(
         }
         Some(uid) => {
             log::warn!("[{serial}] daemon uid={uid} (非 root)，重啟為 root...");
-            let _ = commands::shell(serial, "pkill -f realtime_profile").await;
-            sleep(Duration::from_millis(500)).await;
+            kill_daemon(serial).await;
             deploy_and_start(serial, local_path, remote_path, grpc_port).await
         }
         None => {
             log::warn!("[{serial}] 無法判斷 daemon uid，保守重啟為 root...");
-            let _ = commands::shell(serial, "pkill -f realtime_profile").await;
-            sleep(Duration::from_millis(500)).await;
+            kill_daemon(serial).await;
             deploy_and_start(serial, local_path, remote_path, grpc_port).await
         }
     }
