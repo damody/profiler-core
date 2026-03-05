@@ -926,6 +926,49 @@ pub extern "C" fn profiler_adb_shell(
     }
 }
 
+/// Pull a file from the device to a local path via `adb pull`.
+///
+/// All three parameters are UTF-16 null-terminated strings.
+#[no_mangle]
+pub extern "C" fn profiler_adb_pull(
+    serial: *const u16,
+    remote: *const u16,
+    local: *const u16,
+) -> ProfilerResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if serial.is_null() || remote.is_null() || local.is_null() {
+            return ProfilerResult::InvalidParameter;
+        }
+        let serial_str = unsafe { from_wide_ptr(serial) };
+        let remote_str = unsafe { from_wide_ptr(remote) };
+        let local_str = unsafe { from_wide_ptr(local) };
+        let rt = crate::runtime();
+
+        match rt.block_on(adb::commands::pull(&serial_str, &remote_str, &local_str)) {
+            Ok(()) => ProfilerResult::Ok,
+            Err(e) => {
+                log::error!("profiler_adb_pull: {e:#}");
+                crate::set_last_error(&format!("{e:#}"));
+                ProfilerResult::OperationFailed
+            }
+        }
+    })) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                format!("profiler_adb_pull panicked: {s}")
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                format!("profiler_adb_pull panicked: {s}")
+            } else {
+                "profiler_adb_pull panicked (unknown payload)".to_string()
+            };
+            log::error!("{msg}");
+            crate::set_last_error(&msg);
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
 /// Free a wide string returned by `profiler_adb_shell`.
 #[no_mangle]
 pub extern "C" fn profiler_free_string(ptr: *mut u16) {
