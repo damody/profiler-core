@@ -2636,6 +2636,171 @@ pub extern "C" fn profiler_cml_is_finished(handle: u64) -> bool {
 // GPU Counters (GC) streaming
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Device Event Discovery (Ftrace + PMU)
+// ---------------------------------------------------------------------------
+
+/// Discover ftrace events cached by the daemon.
+///
+/// On success, populates `out` with event list.
+/// Call `profiler_free_ftrace_discover` to release the returned data.
+#[no_mangle]
+pub extern "C" fn profiler_discover_ftrace_events(
+    serial: *const u16,
+    out: *mut ProfilerFtraceDiscoverResult,
+) -> ProfilerResult {
+    if serial.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let rt = crate::runtime();
+
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+
+    match rt.block_on(entry.client.discover_ftrace_events()) {
+        Ok(resp) => {
+            let ready = if resp.ready { 1i32 } else { 0i32 };
+            let count = resp.events.len();
+            let events_ptr = if count > 0 {
+                let mut ffi_events: Vec<ProfilerFtraceEventInfo> = resp
+                    .events
+                    .iter()
+                    .map(|e| ProfilerFtraceEventInfo {
+                        category: to_wide_ptr(&e.category),
+                        event_name: to_wide_ptr(&e.event_name),
+                    })
+                    .collect();
+                let p = ffi_events.as_mut_ptr();
+                std::mem::forget(ffi_events);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            unsafe {
+                (*out).events = events_ptr;
+                (*out).events_count = count;
+                (*out).ready = ready;
+            }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            log::error!("profiler_discover_ftrace_events: {e:#}");
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Free the data returned by `profiler_discover_ftrace_events`.
+#[no_mangle]
+pub extern "C" fn profiler_free_ftrace_discover(data: *mut ProfilerFtraceDiscoverResult) {
+    if data.is_null() {
+        return;
+    }
+    unsafe {
+        let events_ptr = (*data).events;
+        let events_count = (*data).events_count;
+        if !events_ptr.is_null() && events_count > 0 {
+            let events = Vec::from_raw_parts(events_ptr, events_count, events_count);
+            for e in events {
+                free_wide_ptr(e.category);
+                free_wide_ptr(e.event_name);
+            }
+        }
+        (*data).events = ptr::null_mut();
+        (*data).events_count = 0;
+        (*data).ready = 0;
+    }
+}
+
+/// Discover PMU events cached by the daemon.
+///
+/// On success, populates `out` with event list including support status.
+/// Call `profiler_free_pmu_discover` to release the returned data.
+#[no_mangle]
+pub extern "C" fn profiler_discover_pmu_events(
+    serial: *const u16,
+    out: *mut ProfilerPmuDiscoverResult,
+) -> ProfilerResult {
+    if serial.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let rt = crate::runtime();
+
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+
+    match rt.block_on(entry.client.discover_pmu_events()) {
+        Ok(resp) => {
+            let ready = if resp.ready { 1i32 } else { 0i32 };
+            let count = resp.events.len();
+            let events_ptr = if count > 0 {
+                let mut ffi_events: Vec<ProfilerPmuEventInfo> = resp
+                    .events
+                    .iter()
+                    .map(|e| ProfilerPmuEventInfo {
+                        index: e.index,
+                        _pad0: 0,
+                        name: to_wide_ptr(&e.name),
+                        code: e.code,
+                        category: to_wide_ptr(&e.category),
+                        description: to_wide_ptr(&e.description),
+                        is_core: if e.is_core { 1 } else { 0 },
+                        is_supported: if e.is_supported { 1 } else { 0 },
+                    })
+                    .collect();
+                let p = ffi_events.as_mut_ptr();
+                std::mem::forget(ffi_events);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            unsafe {
+                (*out).events = events_ptr;
+                (*out).events_count = count;
+                (*out).ready = ready;
+            }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            log::error!("profiler_discover_pmu_events: {e:#}");
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Free the data returned by `profiler_discover_pmu_events`.
+#[no_mangle]
+pub extern "C" fn profiler_free_pmu_discover(data: *mut ProfilerPmuDiscoverResult) {
+    if data.is_null() {
+        return;
+    }
+    unsafe {
+        let events_ptr = (*data).events;
+        let events_count = (*data).events_count;
+        if !events_ptr.is_null() && events_count > 0 {
+            let events = Vec::from_raw_parts(events_ptr, events_count, events_count);
+            for e in events {
+                free_wide_ptr(e.name);
+                free_wide_ptr(e.category);
+                free_wide_ptr(e.description);
+            }
+        }
+        (*data).events = ptr::null_mut();
+        (*data).events_count = 0;
+        (*data).ready = 0;
+    }
+}
+
 /// Discover Mali GPUs and available counters on the device.
 ///
 /// On success, populates `out` with GPU info and counter lists.

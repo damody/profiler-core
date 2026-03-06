@@ -333,6 +333,46 @@ pub struct ProfilerCmlData {
 }
 
 // ---------------------------------------------------------------------------
+// Device Event Discovery types
+// ---------------------------------------------------------------------------
+
+/// A single ftrace event discovered on the device.
+#[repr(C)]
+pub struct ProfilerFtraceEventInfo {
+    pub category: *mut u16,      // UTF-16
+    pub event_name: *mut u16,    // UTF-16
+}
+
+/// Ftrace discovery result.
+#[repr(C)]
+pub struct ProfilerFtraceDiscoverResult {
+    pub events: *mut ProfilerFtraceEventInfo,
+    pub events_count: usize,
+    pub ready: i32, // 0=false, 1=true
+}
+
+/// A single PMU event discovered on the device.
+#[repr(C)]
+pub struct ProfilerPmuEventInfo {
+    pub index: u32,
+    pub _pad0: u32,              // explicit padding (pointer alignment)
+    pub name: *mut u16,          // UTF-16
+    pub code: u64,
+    pub category: *mut u16,      // UTF-16
+    pub description: *mut u16,   // UTF-16
+    pub is_core: i32,            // 0/1
+    pub is_supported: i32,       // 0/1
+}
+
+/// PMU discovery result.
+#[repr(C)]
+pub struct ProfilerPmuDiscoverResult {
+    pub events: *mut ProfilerPmuEventInfo,
+    pub events_count: usize,
+    pub ready: i32,
+}
+
+// ---------------------------------------------------------------------------
 // GPU Counters (GC) types
 // ---------------------------------------------------------------------------
 

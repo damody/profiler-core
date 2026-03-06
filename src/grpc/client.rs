@@ -858,6 +858,36 @@ impl ProfilerClient {
     }
 
     // =========================================================================
+    // Device Event Discovery
+    // =========================================================================
+
+    /// Discover ftrace events cached by the daemon.
+    pub async fn discover_ftrace_events(
+        &mut self,
+    ) -> Result<crate::proto::DiscoverFtraceResponse> {
+        let resp = self
+            .inner
+            .discover_ftrace_events(Empty {})
+            .await
+            .context("DiscoverFtraceEvents RPC failed")?
+            .into_inner();
+        Ok(resp)
+    }
+
+    /// Discover PMU events cached by the daemon.
+    pub async fn discover_pmu_events(
+        &mut self,
+    ) -> Result<crate::proto::DiscoverPmuResponse> {
+        let resp = self
+            .inner
+            .discover_pmu_events(Empty {})
+            .await
+            .context("DiscoverPmuEvents RPC failed")?
+            .into_inner();
+        Ok(resp)
+    }
+
+    // =========================================================================
     // GPU Counters
     // =========================================================================
 
