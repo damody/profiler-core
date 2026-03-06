@@ -887,6 +887,19 @@ impl ProfilerClient {
         Ok(resp)
     }
 
+    /// Get PMU hardware counter counts per CPU.
+    pub async fn get_pmu_hw_counters(
+        &mut self,
+    ) -> Result<crate::proto::PmuHwCounterResponse> {
+        let resp = self
+            .inner
+            .get_pmu_hw_counters(Empty {})
+            .await
+            .context("GetPmuHwCounters RPC failed")?
+            .into_inner();
+        Ok(resp)
+    }
+
     // =========================================================================
     // GPU Counters
     // =========================================================================

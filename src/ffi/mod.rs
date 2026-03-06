@@ -2801,6 +2801,79 @@ pub extern "C" fn profiler_free_pmu_discover(data: *mut ProfilerPmuDiscoverResul
     }
 }
 
+/// Get PMU hardware counter counts per CPU.
+///
+/// On success, populates `out` with per-CPU counter counts.
+/// Call `profiler_free_pmu_hw_counters` to release the returned data.
+#[no_mangle]
+pub extern "C" fn profiler_get_pmu_hw_counters(
+    serial: *const u16,
+    out: *mut ProfilerPmuHwCounterResult,
+) -> ProfilerResult {
+    if serial.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let rt = crate::runtime();
+
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+
+    match rt.block_on(entry.client.get_pmu_hw_counters()) {
+        Ok(resp) => {
+            let ready = if resp.ready { 1i32 } else { 0i32 };
+            let count = resp.cpus.len();
+            let counters_ptr = if count > 0 {
+                let mut ffi_counters: Vec<ProfilerPmuHwCounter> = resp
+                    .cpus
+                    .iter()
+                    .map(|c| ProfilerPmuHwCounter {
+                        cpu: c.cpu,
+                        counter_count: c.counter_count,
+                    })
+                    .collect();
+                let p = ffi_counters.as_mut_ptr();
+                std::mem::forget(ffi_counters);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            unsafe {
+                (*out).counters = counters_ptr;
+                (*out).count = count;
+                (*out).ready = ready;
+            }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            log::error!("profiler_get_pmu_hw_counters: {e:#}");
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Free the data returned by `profiler_get_pmu_hw_counters`.
+#[no_mangle]
+pub extern "C" fn profiler_free_pmu_hw_counters(data: *mut ProfilerPmuHwCounterResult) {
+    if data.is_null() {
+        return;
+    }
+    unsafe {
+        let ptr = (*data).counters;
+        let count = (*data).count;
+        if !ptr.is_null() && count > 0 {
+            let _ = Vec::from_raw_parts(ptr, count, count);
+        }
+        (*data).counters = ptr::null_mut();
+        (*data).count = 0;
+        (*data).ready = 0;
+    }
+}
+
 /// Discover Mali GPUs and available counters on the device.
 ///
 /// On success, populates `out` with GPU info and counter lists.

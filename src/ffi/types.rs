@@ -373,6 +373,25 @@ pub struct ProfilerPmuDiscoverResult {
 }
 
 // ---------------------------------------------------------------------------
+// PMU Hardware Counter types
+// ---------------------------------------------------------------------------
+
+/// Per-CPU PMU hardware counter count.
+#[repr(C)]
+pub struct ProfilerPmuHwCounter {
+    pub cpu: i32,
+    pub counter_count: i32,
+}
+
+/// Result of PMU hardware counter query.
+#[repr(C)]
+pub struct ProfilerPmuHwCounterResult {
+    pub counters: *mut ProfilerPmuHwCounter,
+    pub count: usize,
+    pub ready: i32,
+}
+
+// ---------------------------------------------------------------------------
 // GPU Counters (GC) types
 // ---------------------------------------------------------------------------
 
