@@ -1021,13 +1021,22 @@ pub extern "C" fn profiler_wifi_adb_connect(
             return ProfilerResult::OperationFailed;
         }
 
-        // 3. Wait for adbd to restart
-        log::info!("profiler_wifi_adb_connect: step 3 — sleep 2s");
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // 3. Poll for adbd restart + connect (up to 5s)
+        log::info!("profiler_wifi_adb_connect: step 3 — poll connect {ip_str}:{port}");
+        let ip_clone = ip_str.clone();
+        let connect_result = rt.block_on(async {
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                match adb::commands::connect_device(&ip_clone, port).await {
+                    Ok(result) => return Ok(result),
+                    Err(_) if tokio::time::Instant::now() < deadline => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        });
 
-        // 4. Connect
-        log::info!("profiler_wifi_adb_connect: step 4 — connect {ip_str}:{port}");
-        match rt.block_on(adb::commands::connect_device(&ip_str, port)) {
+        match connect_result {
             Ok(result) => {
                 log::info!("profiler_wifi_adb_connect: success — {result}");
                 unsafe { *out = to_wide_ptr(&result); }

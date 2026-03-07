@@ -23,8 +23,18 @@ async fn ensure_root_and_permissive(serial: &str) -> RootMode {
         Ok(msg) => log::info!("adb root response: {msg}"),
         Err(e) => log::warn!("adb root failed: {e:#}"),
     }
-    // adb root restarts adbd; wait for reconnection
-    sleep(Duration::from_millis(2000)).await;
+    // adb root restarts adbd; poll until reconnected (up to 5s)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        sleep(Duration::from_millis(100)).await;
+        if commands::shell(serial, "echo ok").await.is_ok() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            log::warn!("adbd reconnect timed out after 5s");
+            break;
+        }
+    }
 
     if let Ok(true) = commands::is_root_shell(serial).await {
         log::info!("[{serial}] root mode: adb (adbd running as root)");
@@ -94,7 +104,18 @@ async fn start_daemon(serial: &str, remote_path: &str, grpc_port: u16) -> Result
         log::info!("[{serial}] pkill 未能殺掉 root daemon，使用 su -c pkill");
         let _ = commands::shell(serial, "su -c \"pkill -f realtime_profile\"").await;
     }
-    sleep(Duration::from_millis(500)).await;
+    // Poll until process is dead (up to 2s)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        sleep(Duration::from_millis(100)).await;
+        if !is_running(serial).await {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            log::warn!("pkill wait timed out after 2s");
+            break;
+        }
+    }
 
     // Start in background (with root if available)
     let remote_dir = remote_path
@@ -120,8 +141,18 @@ async fn start_daemon(serial: &str, remote_path: &str, grpc_port: u16) -> Result
         .await
         .context("Failed to start realtime_profile daemon")?;
 
-    // Give it a moment to boot
-    sleep(Duration::from_millis(1000)).await;
+    // Poll until daemon is running (up to 3s)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        sleep(Duration::from_millis(100)).await;
+        if is_running(serial).await {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            log::warn!("daemon boot wait timed out after 3s");
+            break;
+        }
+    }
 
     log::info!(
         "realtime_profile daemon started on {serial}, grpc_port {grpc_port}, root_mode: {root_mode:?}"
@@ -209,7 +240,18 @@ async fn kill_daemon(serial: &str) {
         log::info!("[{serial}] pkill 未能殺掉 daemon，嘗試 su -c pkill");
         let _ = commands::shell(serial, "su -c \"pkill -f realtime_profile\"").await;
     }
-    sleep(Duration::from_millis(500)).await;
+    // Poll until process is dead (up to 2s)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        sleep(Duration::from_millis(100)).await;
+        if !is_running(serial).await {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            log::warn!("kill_daemon wait timed out after 2s");
+            break;
+        }
+    }
 }
 
 /// Ensure daemon is running as root. If a non-root daemon exists, restart it.
