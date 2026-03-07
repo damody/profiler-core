@@ -197,6 +197,12 @@ pub extern "C" fn profiler_connect_with_port(serial: *const u16, port: u16) -> P
     }
 }
 
+/// Enable or disable gRPC zstd compression. Must be called before `profiler_connect`.
+#[no_mangle]
+pub extern "C" fn profiler_set_grpc_compression(enabled: bool) {
+    crate::set_grpc_compression(enabled);
+}
+
 /// Deploy (if needed) and connect to the realtime_profile daemon.
 ///
 /// 1. Check if daemon is already running (`pidof`).

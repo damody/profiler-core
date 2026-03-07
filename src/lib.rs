@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Once, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -61,6 +62,17 @@ static GC_HANDLES: OnceLock<Mutex<HashMap<u64, GcStreamHandle>>> = OnceLock::new
 
 /// Counter for generating unique GC handle ids.
 static NEXT_GC_HANDLE: OnceLock<Mutex<u64>> = OnceLock::new();
+
+/// Whether to use zstd compression for gRPC communication.
+static GRPC_COMPRESSION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_grpc_compression(enabled: bool) {
+    GRPC_COMPRESSION_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+pub fn grpc_compression_enabled() -> bool {
+    GRPC_COMPRESSION_ENABLED.load(Ordering::SeqCst)
+}
 
 /// An active connection to a device's realtime_profile daemon.
 pub struct ConnectionEntry {

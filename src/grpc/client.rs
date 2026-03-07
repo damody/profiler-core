@@ -89,7 +89,12 @@ impl ProfilerClient {
             .await
             .context("Failed to connect to gRPC server")?;
 
-        let client = ProfilerServiceClient::new(channel);
+        let mut client = ProfilerServiceClient::new(channel);
+        if crate::grpc_compression_enabled() {
+            client = client
+                .send_compressed(tonic::codec::CompressionEncoding::Zstd)
+                .accept_compressed(tonic::codec::CompressionEncoding::Zstd);
+        }
         Ok(Self { inner: client })
     }
 
