@@ -19,7 +19,7 @@ pub async fn shell(serial: &str, command: &str) -> Result<String> {
 /// Push a local file to the device.
 pub async fn push(serial: &str, local: &str, remote: &str) -> Result<()> {
     let output = super::adb_command()
-        .args(["-s", serial, "push", local, remote])
+        .args(["-s", serial, "push", "-z", "zstd", local, remote])
         .output()
         .await
         .context("Failed to execute adb push")?;
@@ -35,7 +35,7 @@ pub async fn push(serial: &str, local: &str, remote: &str) -> Result<()> {
 /// Pull a remote file from the device to local.
 pub async fn pull(serial: &str, remote: &str, local: &str) -> Result<()> {
     let output = super::adb_command()
-        .args(["-s", serial, "pull", remote, local])
+        .args(["-s", serial, "pull", "-z", "zstd", remote, local])
         .output()
         .await
         .context("Failed to execute adb pull")?;
