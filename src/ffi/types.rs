@@ -139,6 +139,7 @@ pub struct ProfilerPackageInfo {
     pub package_name: *mut u16,
     pub apk_path: *mut u16,
     pub version_name: *mut u16,
+    pub app_label: *mut u16,
     pub version_code: i32,
     pub pid: i32,
 }

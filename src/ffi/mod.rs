@@ -1174,6 +1174,7 @@ pub extern "C" fn profiler_list_packages(
                         package_name: to_wide_ptr(&p.package_name),
                         apk_path: to_wide_ptr(&p.apk_path),
                         version_name: to_wide_ptr(&p.version_name),
+                        app_label: to_wide_ptr(&p.app_label),
                         version_code: p.version_code,
                         pid: p.pid,
                     })
@@ -1215,6 +1216,7 @@ pub extern "C" fn profiler_free_package_list(list: *mut ProfilerPackageList) {
                 free_wide_ptr(p.package_name);
                 free_wide_ptr(p.apk_path);
                 free_wide_ptr(p.version_name);
+                free_wide_ptr(p.app_label);
             }
         }
         (*list).packages = ptr::null_mut();
@@ -1241,6 +1243,7 @@ pub extern "C" fn profiler_get_package_info(
                     (*out).package_name = to_wide_ptr(&info.package_name);
                     (*out).apk_path = to_wide_ptr(&info.apk_path);
                     (*out).version_name = to_wide_ptr(&info.version_name);
+                    (*out).app_label = to_wide_ptr(&info.app_label);
                     (*out).version_code = info.version_code;
                     (*out).pid = info.pid;
                 }
@@ -1264,9 +1267,11 @@ pub extern "C" fn profiler_free_package_info(info: *mut ProfilerPackageInfo) {
         free_wide_ptr((*info).package_name);
         free_wide_ptr((*info).apk_path);
         free_wide_ptr((*info).version_name);
+        free_wide_ptr((*info).app_label);
         (*info).package_name = ptr::null_mut();
         (*info).apk_path = ptr::null_mut();
         (*info).version_name = ptr::null_mut();
+        (*info).app_label = ptr::null_mut();
     }
 }
 

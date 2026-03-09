@@ -40,6 +40,7 @@ pub struct PackageInfoResult {
     pub version_name: String,
     pub version_code: i32,
     pub pid: i32,
+    pub app_label: String,
 }
 
 /// Shell command result.
@@ -357,6 +358,7 @@ impl ProfilerClient {
                 version_name: p.version_name,
                 version_code: p.version_code,
                 pid: p.pid,
+                app_label: p.app_label,
             })
             .collect())
     }
@@ -378,6 +380,7 @@ impl ProfilerClient {
             version_name: resp.version_name,
             version_code: resp.version_code,
             pid: resp.pid,
+            app_label: resp.app_label,
         })
     }
 
