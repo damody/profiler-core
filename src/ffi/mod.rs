@@ -3040,7 +3040,9 @@ pub extern "C" fn profiler_start_gc(
             ProfilerResult::Ok
         }
         Err(e) => {
-            log::error!("profiler_start_gc: {e:#}");
+            let msg = format!("{e:#}");
+            log::error!("profiler_start_gc: {msg}");
+            crate::set_last_error(&msg);
             ProfilerResult::OperationFailed
         }
     }
