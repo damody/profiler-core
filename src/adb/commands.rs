@@ -48,6 +48,23 @@ pub async fn pull(serial: &str, remote: &str, local: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run `adb -s <serial> remount` to remount partitions as read-write.
+pub async fn remount(serial: &str) -> Result<String> {
+    let output = super::adb_command()
+        .args(["-s", serial, "remount"])
+        .output()
+        .await
+        .context("Failed to execute adb remount")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    // remount 的有用訊息可能在 stdout 或 stderr
+    if !stderr.is_empty() && stdout.is_empty() {
+        Ok(stderr)
+    } else {
+        Ok(stdout)
+    }
+}
+
 /// Run `adb -s <serial> root` to restart adbd as root.
 pub async fn root(serial: &str) -> Result<String> {
     let output = super::adb_command()

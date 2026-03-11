@@ -932,6 +932,94 @@ pub extern "C" fn profiler_adb_shell(
     }
 }
 
+/// Execute `adb root` and return the output as a wide string.
+///
+/// On success `*out` is set to a newly-allocated wide string that the caller
+/// must free with `profiler_free_string`.
+#[no_mangle]
+pub extern "C" fn profiler_adb_root(
+    serial: *const u16,
+    out: *mut *mut u16,
+) -> ProfilerResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if serial.is_null() || out.is_null() {
+            return ProfilerResult::InvalidParameter;
+        }
+        let serial_str = unsafe { from_wide_ptr(serial) };
+        let rt = crate::runtime();
+
+        match rt.block_on(adb::commands::root(&serial_str)) {
+            Ok(output) => {
+                unsafe { *out = to_wide_ptr(&output); }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_adb_root: {e:#}");
+                unsafe { *out = ptr::null_mut(); }
+                ProfilerResult::OperationFailed
+            }
+        }
+    })) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                format!("profiler_adb_root panicked: {s}")
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                format!("profiler_adb_root panicked: {s}")
+            } else {
+                "profiler_adb_root panicked (unknown payload)".to_string()
+            };
+            log::error!("{msg}");
+            crate::set_last_error(&msg);
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Execute `adb remount` and return the output as a wide string.
+///
+/// On success `*out` is set to a newly-allocated wide string that the caller
+/// must free with `profiler_free_string`.
+#[no_mangle]
+pub extern "C" fn profiler_adb_remount(
+    serial: *const u16,
+    out: *mut *mut u16,
+) -> ProfilerResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if serial.is_null() || out.is_null() {
+            return ProfilerResult::InvalidParameter;
+        }
+        let serial_str = unsafe { from_wide_ptr(serial) };
+        let rt = crate::runtime();
+
+        match rt.block_on(adb::commands::remount(&serial_str)) {
+            Ok(output) => {
+                unsafe { *out = to_wide_ptr(&output); }
+                ProfilerResult::Ok
+            }
+            Err(e) => {
+                log::error!("profiler_adb_remount: {e:#}");
+                unsafe { *out = ptr::null_mut(); }
+                ProfilerResult::OperationFailed
+            }
+        }
+    })) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                format!("profiler_adb_remount panicked: {s}")
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                format!("profiler_adb_remount panicked: {s}")
+            } else {
+                "profiler_adb_remount panicked (unknown payload)".to_string()
+            };
+            log::error!("{msg}");
+            crate::set_last_error(&msg);
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
 /// Pull a file from the device to a local path via `adb pull`.
 ///
 /// All three parameters are UTF-16 null-terminated strings.
