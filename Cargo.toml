@@ -21,6 +21,9 @@ anyhow = "1.0"
 regex = "1.10"
 crossbeam-queue = "0.3"
 tokio-util = "0.7"
+libloading = "0.8"
+umya-spreadsheet = "2"
+thiserror = "2"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel"] }
 
 [profile.release]

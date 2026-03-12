@@ -1,6 +1,7 @@
 pub mod ffi;
 pub mod adb;
 pub mod grpc;
+pub mod daq;
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -26,6 +27,8 @@ static CRASH_LOG_RESET_INIT: Once = Once::new();
 
 use crate::grpc::client::ProfilerClient;
 use crate::grpc::streaming::{RtbStreamHandle, CrStreamHandle, TcStreamHandle, CmlStreamHandle, GcStreamHandle};
+use crate::daq::streaming::DaqStreamHandle;
+use crate::daq::config::DaqConfig;
 
 /// Global tokio runtime, lazily initialized via `init_runtime()`.
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -62,6 +65,18 @@ static GC_HANDLES: OnceLock<Mutex<HashMap<u64, GcStreamHandle>>> = OnceLock::new
 
 /// Counter for generating unique GC handle ids.
 static NEXT_GC_HANDLE: OnceLock<Mutex<u64>> = OnceLock::new();
+
+/// Active DAQ stream handles keyed by handle id.
+static DAQ_HANDLES: OnceLock<Mutex<HashMap<u64, DaqStreamHandle>>> = OnceLock::new();
+
+/// Counter for generating unique DAQ handle ids.
+static NEXT_DAQ_HANDLE: OnceLock<Mutex<u64>> = OnceLock::new();
+
+/// Active DAQ configurations keyed by config handle id.
+static DAQ_CONFIGS: OnceLock<Mutex<HashMap<u64, DaqConfig>>> = OnceLock::new();
+
+/// Counter for generating unique DAQ config handle ids.
+static NEXT_DAQ_CONFIG: OnceLock<Mutex<u64>> = OnceLock::new();
 
 /// Whether to use zstd compression for gRPC communication.
 static GRPC_COMPRESSION_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -101,6 +116,10 @@ pub fn init_runtime() -> bool {
     let _ = NEXT_CML_HANDLE.set(Mutex::new(1));
     let _ = GC_HANDLES.set(Mutex::new(HashMap::new()));
     let _ = NEXT_GC_HANDLE.set(Mutex::new(1));
+    let _ = DAQ_HANDLES.set(Mutex::new(HashMap::new()));
+    let _ = NEXT_DAQ_HANDLE.set(Mutex::new(1));
+    let _ = DAQ_CONFIGS.set(Mutex::new(HashMap::new()));
+    let _ = NEXT_DAQ_CONFIG.set(Mutex::new(1));
     let _ = LAST_ERROR.set(Mutex::new(String::new()));
 
     if created {
@@ -151,6 +170,19 @@ pub fn shutdown_runtime() {
         for (_id, handle) in map.drain() {
             handle.cancel();
         }
+    }
+
+    // Drop all DAQ handles (cancels streams)
+    if let Some(handles) = DAQ_HANDLES.get() {
+        let mut map = handles.lock();
+        for (_id, handle) in map.drain() {
+            handle.cancel();
+        }
+    }
+
+    // Clear DAQ configs
+    if let Some(configs) = DAQ_CONFIGS.get() {
+        configs.lock().clear();
     }
 
     // Shutdown all connected daemons via gRPC, then drop connections
@@ -241,6 +273,34 @@ pub fn gc_handles() -> &'static Mutex<HashMap<u64, GcStreamHandle>> {
 /// Allocate a new unique GC handle id.
 pub fn next_gc_handle_id() -> u64 {
     let counter = NEXT_GC_HANDLE.get().expect("Runtime not initialized");
+    let mut val = counter.lock();
+    let id = *val;
+    *val += 1;
+    id
+}
+
+/// Get the DAQ handles map.
+pub fn daq_handles() -> &'static Mutex<HashMap<u64, DaqStreamHandle>> {
+    DAQ_HANDLES.get().expect("Runtime not initialized")
+}
+
+/// Allocate a new unique DAQ handle id.
+pub fn next_daq_handle_id() -> u64 {
+    let counter = NEXT_DAQ_HANDLE.get().expect("Runtime not initialized");
+    let mut val = counter.lock();
+    let id = *val;
+    *val += 1;
+    id
+}
+
+/// Get the DAQ configs map.
+pub fn daq_configs() -> &'static Mutex<HashMap<u64, DaqConfig>> {
+    DAQ_CONFIGS.get().expect("Runtime not initialized")
+}
+
+/// Allocate a new unique DAQ config handle id.
+pub fn next_daq_config_id() -> u64 {
+    let counter = NEXT_DAQ_CONFIG.get().expect("Runtime not initialized");
     let mut val = counter.lock();
     let id = *val;
     *val += 1;

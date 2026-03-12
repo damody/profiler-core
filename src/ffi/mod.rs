@@ -3210,3 +3210,543 @@ pub extern "C" fn profiler_free_gc_data(data: *mut ProfilerGcData) {
         (*data).counters_count = 0;
     }
 }
+
+// =========================================================================
+// DAQ (NI-DAQmx Power Breakdown)
+// =========================================================================
+
+/// List connected NI-DAQmx devices.
+#[no_mangle]
+pub extern "C" fn profiler_daq_list_devices(list: *mut ProfilerDaqDeviceList) -> ProfilerResult {
+    if list.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+
+    let lib = match crate::daq::DaqmxLib::load() {
+        Ok(l) => l,
+        Err(e) => {
+            crate::set_last_error(e.to_string());
+            return ProfilerResult::OperationFailed;
+        }
+    };
+
+    let devices = match crate::daq::device::enumerate_devices(&lib) {
+        Ok(d) => d,
+        Err(crate::daq::error::DaqmxError::NoDevices) => {
+            // NoDevices is not a failure — return Ok with empty list
+            unsafe {
+                (*list).devices = ptr::null_mut();
+                (*list).count = 0;
+            }
+            return ProfilerResult::Ok;
+        }
+        Err(e) => {
+            crate::set_last_error(format!("Device enumeration failed: {}", e));
+            unsafe {
+                (*list).devices = ptr::null_mut();
+                (*list).count = 0;
+            }
+            return ProfilerResult::OperationFailed;
+        }
+    };
+
+    let mut native_devices: Vec<ProfilerDaqDevice> = devices
+        .iter()
+        .map(|d| ProfilerDaqDevice {
+            name: to_wide_ptr(&d.name),
+            product_type: to_wide_ptr(&d.product_type),
+            serial_number: d.serial_number,
+            ai_channel_count: d.ai_channels.len() as u32,
+        })
+        .collect();
+
+    let count = native_devices.len();
+    let ptr_out = if count > 0 {
+        let p = native_devices.as_mut_ptr();
+        std::mem::forget(native_devices);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    unsafe {
+        (*list).devices = ptr_out;
+        (*list).count = count;
+    }
+    ProfilerResult::Ok
+}
+
+/// Free a DAQ device list.
+#[no_mangle]
+pub extern "C" fn profiler_daq_free_devices(list: *mut ProfilerDaqDeviceList) {
+    if list.is_null() {
+        return;
+    }
+    unsafe {
+        let devices_ptr = (*list).devices;
+        let count = (*list).count;
+        if !devices_ptr.is_null() && count > 0 {
+            let devices = Vec::from_raw_parts(devices_ptr, count, count);
+            for d in &devices {
+                free_wide_ptr(d.name);
+                free_wide_ptr(d.product_type);
+            }
+        }
+        (*list).devices = ptr::null_mut();
+        (*list).count = 0;
+    }
+}
+
+/// Load a DAQ configuration from an Excel file. Returns a config handle.
+#[no_mangle]
+pub extern "C" fn profiler_daq_load_config(
+    excel_path: *const u16,
+    out_handle: *mut u64,
+) -> ProfilerResult {
+    if excel_path.is_null() || out_handle.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+
+    let path_str = unsafe { from_wide_ptr(excel_path) };
+    let path = std::path::Path::new(&path_str);
+
+    match crate::daq::load_config(path) {
+        Ok(config) => {
+            let id = crate::next_daq_config_id();
+            crate::daq_configs().lock().insert(id, config);
+            unsafe { *out_handle = id; }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            crate::set_last_error(format!("Failed to load DAQ config: {}", e));
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Free a loaded DAQ config.
+#[no_mangle]
+pub extern "C" fn profiler_daq_free_config(config_handle: u64) {
+    crate::daq_configs().lock().remove(&config_handle);
+}
+
+/// Get config info (channel names, power pair names) from a loaded config.
+#[no_mangle]
+pub extern "C" fn profiler_daq_get_config_info(
+    config_handle: u64,
+    info: *mut ProfilerDaqConfigInfo,
+) -> ProfilerResult {
+    if info.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+
+    let configs = crate::daq_configs().lock();
+    let config = match configs.get(&config_handle) {
+        Some(c) => c,
+        None => {
+            crate::set_last_error("Invalid config handle");
+            return ProfilerResult::InvalidParameter;
+        }
+    };
+
+    // Channel names
+    let mut ch_ptrs: Vec<*mut u16> = config
+        .channels
+        .iter()
+        .map(|ch| to_wide_ptr(&ch.name))
+        .collect();
+    let ch_count = ch_ptrs.len();
+    let ch_ptr = if ch_count > 0 {
+        let p = ch_ptrs.as_mut_ptr();
+        std::mem::forget(ch_ptrs);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    // Power pair names: use voltage channel name
+    let mut pp_names: Vec<String> = Vec::new();
+    for pp in &config.power_pairs {
+        // Find voltage channel name
+        let v_name = config
+            .channels
+            .iter()
+            .find(|ch| ch.physical_channel == pp.voltage_channel || ch.name == pp.voltage_channel)
+            .map(|ch| ch.name.clone())
+            .unwrap_or_else(|| pp.voltage_channel.clone());
+        pp_names.push(v_name);
+    }
+
+    let mut pp_ptrs: Vec<*mut u16> = pp_names.iter().map(|n| to_wide_ptr(n)).collect();
+    let pp_count = pp_ptrs.len();
+    let pp_ptr = if pp_count > 0 {
+        let p = pp_ptrs.as_mut_ptr();
+        std::mem::forget(pp_ptrs);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    unsafe {
+        (*info).channel_names = ch_ptr;
+        (*info).channel_count = ch_count;
+        (*info).power_pair_names = pp_ptr;
+        (*info).power_pair_count = pp_count;
+    }
+    ProfilerResult::Ok
+}
+
+/// Free a DAQ config info struct.
+#[no_mangle]
+pub extern "C" fn profiler_daq_free_config_info(info: *mut ProfilerDaqConfigInfo) {
+    if info.is_null() {
+        return;
+    }
+    unsafe {
+        let ch_ptr = (*info).channel_names;
+        let ch_count = (*info).channel_count;
+        if !ch_ptr.is_null() && ch_count > 0 {
+            let ptrs = Vec::from_raw_parts(ch_ptr, ch_count, ch_count);
+            for p in &ptrs {
+                free_wide_ptr(*p);
+            }
+        }
+        let pp_ptr = (*info).power_pair_names;
+        let pp_count = (*info).power_pair_count;
+        if !pp_ptr.is_null() && pp_count > 0 {
+            let ptrs = Vec::from_raw_parts(pp_ptr, pp_count, pp_count);
+            for p in &ptrs {
+                free_wide_ptr(*p);
+            }
+        }
+        (*info).channel_names = ptr::null_mut();
+        (*info).channel_count = 0;
+        (*info).power_pair_names = ptr::null_mut();
+        (*info).power_pair_count = 0;
+    }
+}
+
+/// Start DAQ streaming. Returns a stream handle.
+#[no_mangle]
+pub extern "C" fn profiler_daq_start(
+    config_handle: u64,
+    sample_rate: u32,
+    terminal_diff: bool,
+    max_voltage: f64,
+    min_voltage: f64,
+    out_handle: *mut u64,
+) -> ProfilerResult {
+    if out_handle.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+
+    let config = {
+        let configs = crate::daq_configs().lock();
+        match configs.get(&config_handle) {
+            Some(c) => c.clone(),
+            None => {
+                crate::set_last_error("Invalid config handle");
+                return ProfilerResult::InvalidParameter;
+            }
+        }
+    };
+
+    match crate::daq::DaqStreamHandle::start(
+        &config,
+        sample_rate,
+        terminal_diff,
+        max_voltage,
+        min_voltage,
+    ) {
+        Ok(handle) => {
+            let id = crate::next_daq_handle_id();
+            crate::daq_handles().lock().insert(id, handle);
+            unsafe { *out_handle = id; }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            crate::set_last_error(format!("Failed to start DAQ: {}", e));
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+/// Get pending error messages from the DAQ streaming thread.
+#[no_mangle]
+pub extern "C" fn profiler_daq_get_errors(
+    handle: u64,
+    errors: *mut ProfilerDaqErrors,
+) -> ProfilerResult {
+    if errors.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+
+    let handles = crate::daq_handles().lock();
+    let stream = match handles.get(&handle) {
+        Some(s) => s,
+        None => {
+            crate::set_last_error("Invalid DAQ handle");
+            return ProfilerResult::InvalidParameter;
+        }
+    };
+
+    let error_msgs = stream.drain_errors();
+    let count = error_msgs.len();
+
+    if count == 0 {
+        unsafe {
+            (*errors).messages = ptr::null_mut();
+            (*errors).count = 0;
+        }
+        return ProfilerResult::Ok;
+    }
+
+    let mut ptrs: Vec<*mut u16> = error_msgs.iter().map(|s| to_wide_ptr(s)).collect();
+    let p = ptrs.as_mut_ptr();
+    std::mem::forget(ptrs);
+
+    unsafe {
+        (*errors).messages = p;
+        (*errors).count = count;
+    }
+    ProfilerResult::Ok
+}
+
+/// Free DAQ error messages.
+#[no_mangle]
+pub extern "C" fn profiler_daq_free_errors(errors: *mut ProfilerDaqErrors) {
+    if errors.is_null() {
+        return;
+    }
+    unsafe {
+        let msg_ptr = (*errors).messages;
+        let count = (*errors).count;
+        if !msg_ptr.is_null() && count > 0 {
+            let ptrs = Vec::from_raw_parts(msg_ptr, count, count);
+            for p in &ptrs {
+                free_wide_ptr(*p);
+            }
+        }
+        (*errors).messages = ptr::null_mut();
+        (*errors).count = 0;
+    }
+}
+
+/// Poll DAQ for next data point. Returns true if data was available.
+#[no_mangle]
+pub extern "C" fn profiler_daq_poll(
+    handle: u64,
+    data: *mut ProfilerDaqPollData,
+) -> bool {
+    if data.is_null() {
+        return false;
+    }
+
+    let handles = crate::daq_handles().lock();
+    let stream = match handles.get(&handle) {
+        Some(s) => s,
+        None => {
+            log::warn!("DAQ poll: invalid handle {}", handle);
+            return false;
+        }
+    };
+
+    match stream.poll() {
+        Some(poll_data) => {
+            // Convert power pairs
+            let mut power_values: Vec<f64> = Vec::new();
+            let mut power_name_ptrs: Vec<*mut u16> = Vec::new();
+            for (name, value) in &poll_data.power_pairs {
+                power_values.push(*value);
+                power_name_ptrs.push(to_wide_ptr(name));
+            }
+
+            // Convert channel values
+            let mut channel_values: Vec<f64> = Vec::new();
+            let mut channel_name_ptrs: Vec<*mut u16> = Vec::new();
+            for (name, value) in &poll_data.channel_values {
+                channel_values.push(*value);
+                channel_name_ptrs.push(to_wide_ptr(name));
+            }
+
+            let power_count = power_values.len();
+            let channel_count = channel_values.len();
+
+            unsafe {
+                (*data).timestamp_ms = poll_data.timestamp_ms;
+
+                if power_count > 0 {
+                    (*data).power_values = power_values.as_mut_ptr();
+                    std::mem::forget(power_values);
+                    (*data).power_names = power_name_ptrs.as_mut_ptr();
+                    std::mem::forget(power_name_ptrs);
+                } else {
+                    (*data).power_values = ptr::null_mut();
+                    (*data).power_names = ptr::null_mut();
+                }
+                (*data).power_count = power_count;
+
+                if channel_count > 0 {
+                    (*data).channel_values = channel_values.as_mut_ptr();
+                    std::mem::forget(channel_values);
+                    (*data).channel_names = channel_name_ptrs.as_mut_ptr();
+                    std::mem::forget(channel_name_ptrs);
+                } else {
+                    (*data).channel_values = ptr::null_mut();
+                    (*data).channel_names = ptr::null_mut();
+                }
+                (*data).channel_count = channel_count;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Free a DAQ poll data struct.
+#[no_mangle]
+pub extern "C" fn profiler_daq_free_poll_data(data: *mut ProfilerDaqPollData) {
+    if data.is_null() {
+        return;
+    }
+    unsafe {
+        let pc = (*data).power_count;
+        if !(*data).power_values.is_null() && pc > 0 {
+            drop(Vec::from_raw_parts((*data).power_values, pc, pc));
+        }
+        if !(*data).power_names.is_null() && pc > 0 {
+            let ptrs = Vec::from_raw_parts((*data).power_names, pc, pc);
+            for p in &ptrs {
+                free_wide_ptr(*p);
+            }
+        }
+        let cc = (*data).channel_count;
+        if !(*data).channel_values.is_null() && cc > 0 {
+            drop(Vec::from_raw_parts((*data).channel_values, cc, cc));
+        }
+        if !(*data).channel_names.is_null() && cc > 0 {
+            let ptrs = Vec::from_raw_parts((*data).channel_names, cc, cc);
+            for p in &ptrs {
+                free_wide_ptr(*p);
+            }
+        }
+        (*data).power_values = ptr::null_mut();
+        (*data).power_names = ptr::null_mut();
+        (*data).power_count = 0;
+        (*data).channel_values = ptr::null_mut();
+        (*data).channel_names = ptr::null_mut();
+        (*data).channel_count = 0;
+    }
+}
+
+/// Stop DAQ streaming and return summary.
+#[no_mangle]
+pub extern "C" fn profiler_daq_stop(
+    handle: u64,
+    summary: *mut ProfilerDaqSummary,
+) -> ProfilerResult {
+    if summary.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+
+    let stream = crate::daq_handles().lock().remove(&handle);
+    match stream {
+        Some(s) => {
+            let result = match s.stop() {
+                Ok(r) => r,
+                Err(e) => {
+                    crate::set_last_error(format!("DAQ stop failed: {}", e));
+                    return ProfilerResult::OperationFailed;
+                }
+            };
+
+            // Convert channel stats
+            let mut native_channels: Vec<ProfilerDaqChannelStats> = result
+                .channels
+                .iter()
+                .map(|ch| ProfilerDaqChannelStats {
+                    name: to_wide_ptr(&ch.name),
+                    mean: ch.mean,
+                    min: ch.min,
+                    max: ch.max,
+                    rms: ch.rms,
+                    color_rgb: ((ch.color_r as u32) << 16) | ((ch.color_g as u32) << 8) | (ch.color_b as u32),
+                    is_current: if ch.is_current { 1 } else { 0 },
+                    pair_index: ch.pair_index,
+                })
+                .collect();
+
+            let ch_count = native_channels.len();
+            let ch_ptr = if ch_count > 0 {
+                let p = native_channels.as_mut_ptr();
+                std::mem::forget(native_channels);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            // Convert power breakdown
+            let mut native_breakdown: Vec<ProfilerDaqPowerBreakdown> = result
+                .power_breakdown
+                .iter()
+                .map(|pb| ProfilerDaqPowerBreakdown {
+                    name: to_wide_ptr(&pb.name),
+                    avg_power_mw: pb.avg_power_mw,
+                })
+                .collect();
+
+            let pb_count = native_breakdown.len();
+            let pb_ptr = if pb_count > 0 {
+                let p = native_breakdown.as_mut_ptr();
+                std::mem::forget(native_breakdown);
+                p
+            } else {
+                ptr::null_mut()
+            };
+
+            unsafe {
+                (*summary).channels = ch_ptr;
+                (*summary).channel_count = ch_count;
+                (*summary).power_breakdown = pb_ptr;
+                (*summary).power_breakdown_count = pb_count;
+                (*summary).total_power_mw = result.total_power_mw;
+                (*summary).measurement_time_s = result.measurement_time_s;
+            }
+            ProfilerResult::Ok
+        }
+        None => {
+            crate::set_last_error("Invalid DAQ handle");
+            ProfilerResult::InvalidParameter
+        }
+    }
+}
+
+/// Free a DAQ summary struct.
+#[no_mangle]
+pub extern "C" fn profiler_daq_free_summary(summary: *mut ProfilerDaqSummary) {
+    if summary.is_null() {
+        return;
+    }
+    unsafe {
+        let ch_ptr = (*summary).channels;
+        let ch_count = (*summary).channel_count;
+        if !ch_ptr.is_null() && ch_count > 0 {
+            let channels = Vec::from_raw_parts(ch_ptr, ch_count, ch_count);
+            for ch in &channels {
+                free_wide_ptr(ch.name);
+            }
+        }
+        let pb_ptr = (*summary).power_breakdown;
+        let pb_count = (*summary).power_breakdown_count;
+        if !pb_ptr.is_null() && pb_count > 0 {
+            let breakdown = Vec::from_raw_parts(pb_ptr, pb_count, pb_count);
+            for pb in &breakdown {
+                free_wide_ptr(pb.name);
+            }
+        }
+        (*summary).channels = ptr::null_mut();
+        (*summary).channel_count = 0;
+        (*summary).power_breakdown = ptr::null_mut();
+        (*summary).power_breakdown_count = 0;
+    }
+}

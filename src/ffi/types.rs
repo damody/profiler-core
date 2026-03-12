@@ -442,3 +442,82 @@ pub struct ProfilerGcData {
     pub counters: *mut ProfilerGcCounterValue,
     pub counters_count: usize,
 }
+
+// ---------------------------------------------------------------------------
+// DAQ types
+// ---------------------------------------------------------------------------
+
+/// A single NI-DAQmx device.
+#[repr(C)]
+pub struct ProfilerDaqDevice {
+    pub name: *mut u16,           // UTF-16
+    pub product_type: *mut u16,   // UTF-16
+    pub serial_number: u32,
+    pub ai_channel_count: u32,
+}
+
+/// List of DAQ devices.
+#[repr(C)]
+pub struct ProfilerDaqDeviceList {
+    pub devices: *mut ProfilerDaqDevice,
+    pub count: usize,
+}
+
+/// Config info returned after loading a DAQ Excel file.
+#[repr(C)]
+pub struct ProfilerDaqConfigInfo {
+    pub channel_names: *mut *mut u16,   // array of UTF-16 strings
+    pub channel_count: usize,
+    pub power_pair_names: *mut *mut u16, // array of UTF-16 strings
+    pub power_pair_count: usize,
+}
+
+/// Error messages from DAQ streaming thread.
+#[repr(C)]
+pub struct ProfilerDaqErrors {
+    pub messages: *mut *mut u16,
+    pub count: usize,
+}
+
+/// A single DAQ poll data point.
+#[repr(C)]
+pub struct ProfilerDaqPollData {
+    pub timestamp_ms: u64,
+    pub power_values: *mut f64,
+    pub power_names: *mut *mut u16,
+    pub power_count: usize,
+    pub channel_values: *mut f64,
+    pub channel_names: *mut *mut u16,
+    pub channel_count: usize,
+}
+
+/// Per-channel statistics in DAQ summary.
+#[repr(C)]
+pub struct ProfilerDaqChannelStats {
+    pub name: *mut u16,
+    pub mean: f64,
+    pub min: f64,
+    pub max: f64,
+    pub rms: f64,
+    pub color_rgb: u32,       // 0x00RRGGBB
+    pub is_current: i32,      // 0/1
+    pub pair_index: i32,      // -1 if none
+}
+
+/// Power pair breakdown entry.
+#[repr(C)]
+pub struct ProfilerDaqPowerBreakdown {
+    pub name: *mut u16,
+    pub avg_power_mw: f64,
+}
+
+/// Summary returned when stopping DAQ.
+#[repr(C)]
+pub struct ProfilerDaqSummary {
+    pub channels: *mut ProfilerDaqChannelStats,
+    pub channel_count: usize,
+    pub power_breakdown: *mut ProfilerDaqPowerBreakdown,
+    pub power_breakdown_count: usize,
+    pub total_power_mw: f64,
+    pub measurement_time_s: f64,
+}
