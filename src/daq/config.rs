@@ -154,7 +154,7 @@ fn convert_voltage_in_name(name: &str) -> String {
 }
 
 fn sanitize_name(name: &str) -> Result<String> {
-    let sanitized = name.replace(',', ";");
+    let sanitized = name.replace(',', ";").replace('/', "_").replace('\\', "_");
     for ch in sanitized.chars() {
         if WRONG_SYMBOLS.contains(&ch) {
             anyhow::bail!(
