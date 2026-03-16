@@ -65,6 +65,22 @@ pub struct DaqmxLib {
     // Scale
     pub create_lin_scale:
         unsafe extern "C" fn(*const c_char, c_double, c_double, c_int, *const c_char) -> c_int,
+    // Buffer
+    pub cfg_input_buffer: unsafe extern "C" fn(TaskHandle, c_uint) -> c_int,
+    // Trigger
+    pub cfg_dig_edge_start_trig:
+        unsafe extern "C" fn(TaskHandle, *const c_char, c_int) -> c_int,
+    // Logging
+    pub configure_logging: unsafe extern "C" fn(
+        TaskHandle,
+        *const c_char,
+        c_int,
+        *const c_char,
+        c_int,
+    ) -> c_int,
+    // Device control
+    pub self_cal: unsafe extern "C" fn(*const c_char) -> c_int,
+    pub reset_device: unsafe extern "C" fn(*const c_char) -> c_int,
     // Error
     pub get_extended_error_info: unsafe extern "C" fn(*mut c_char, c_uint) -> c_int,
 }
@@ -118,6 +134,12 @@ impl DaqmxLib {
             type FnCreateLinScale = unsafe extern "C" fn(
                 *const c_char, c_double, c_double, c_int, *const c_char,
             ) -> c_int;
+            type FnCfgInputBuffer = unsafe extern "C" fn(TaskHandle, c_uint) -> c_int;
+            type FnCfgDigEdgeStartTrig = unsafe extern "C" fn(TaskHandle, *const c_char, c_int) -> c_int;
+            type FnConfigureLogging = unsafe extern "C" fn(
+                TaskHandle, *const c_char, c_int, *const c_char, c_int,
+            ) -> c_int;
+            type FnDeviceString = unsafe extern "C" fn(*const c_char) -> c_int;
             type FnGetExtendedErrorInfo = unsafe extern "C" fn(*mut c_char, c_uint) -> c_int;
 
             let daqmx = DaqmxLib {
@@ -135,6 +157,11 @@ impl DaqmxLib {
                 get_dev_product_type: load_fn!(lib, b"DAQmxGetDevProductType\0", FnGetDevStringProp),
                 get_dev_serial_num: load_fn!(lib, b"DAQmxGetDevSerialNum\0", FnGetDevSerialNum),
                 create_lin_scale: load_fn!(lib, b"DAQmxCreateLinScale\0", FnCreateLinScale),
+                cfg_input_buffer: load_fn!(lib, b"DAQmxCfgInputBuffer\0", FnCfgInputBuffer),
+                cfg_dig_edge_start_trig: load_fn!(lib, b"DAQmxCfgDigEdgeStartTrig\0", FnCfgDigEdgeStartTrig),
+                configure_logging: load_fn!(lib, b"DAQmxConfigureLogging\0", FnConfigureLogging),
+                self_cal: load_fn!(lib, b"DAQmxSelfCal\0", FnDeviceString),
+                reset_device: load_fn!(lib, b"DAQmxResetDevice\0", FnDeviceString),
                 get_extended_error_info: load_fn!(lib, b"DAQmxGetExtendedErrorInfo\0", FnGetExtendedErrorInfo),
                 _lib: lib,
             };

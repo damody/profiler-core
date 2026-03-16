@@ -83,6 +83,40 @@ impl<'a> DaqTask<'a> {
         let code = unsafe { (self.lib.stop_task)(self.handle) };
         self.lib.check(code)
     }
+
+    pub fn cfg_input_buffer(&self, num_samps_per_chan: u32) -> DaqmxResult<()> {
+        let code = unsafe { (self.lib.cfg_input_buffer)(self.handle, num_samps_per_chan) };
+        self.lib.check(code)
+    }
+
+    #[allow(dead_code)]
+    pub fn cfg_pfi12_trigger(&self) -> DaqmxResult<()> {
+        let source = CString::new("/Dev1/PFI12").unwrap();
+        let code = unsafe {
+            (self.lib.cfg_dig_edge_start_trig)(self.handle, source.as_ptr(), DAQmx_Val_Rising)
+        };
+        self.lib.check(code)
+    }
+
+    #[allow(dead_code)]
+    pub fn configure_logging(
+        &self,
+        file_path: &str,
+        logging_mode: i32,
+    ) -> DaqmxResult<()> {
+        let path_c = CString::new(file_path).unwrap();
+        let group = CString::new("").unwrap();
+        let code = unsafe {
+            (self.lib.configure_logging)(
+                self.handle,
+                path_c.as_ptr(),
+                logging_mode,
+                group.as_ptr(),
+                DAQmx_Val_OpenOrCreate,
+            )
+        };
+        self.lib.check(code)
+    }
 }
 
 impl Drop for DaqTask<'_> {

@@ -1,3 +1,4 @@
+use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +35,9 @@ pub struct CallbackContext {
     handle: TaskHandle,
     pub buffer: Arc<Mutex<AccumulationBuffer>>,
     num_channels: usize,
+    /// Pre-allocated read buffer reused across callbacks to avoid per-call allocation.
+    /// Safety: only accessed from the single DAQmx callback thread.
+    read_buf: UnsafeCell<Vec<f64>>,
     pub error_count: AtomicU64,
     pub lock_fail_count: AtomicU64,
 }
@@ -52,7 +56,16 @@ unsafe extern "C" fn every_n_callback(
 ) -> std::os::raw::c_int {
     let ctx = &*(callback_data as *const CallbackContext);
     let total_read = (ctx.num_channels as u32) * n_samples;
-    let mut read_buf = vec![0.0f64; total_read as usize];
+
+    // Reuse pre-allocated buffer; resize only if needed (should not happen in steady state)
+    let read_buf = &mut *ctx.read_buf.get();
+    let needed = total_read as usize;
+    if read_buf.len() < needed {
+        read_buf.resize(needed, 0.0);
+    }
+    // Zero the portion we'll use
+    read_buf[..needed].fill(0.0);
+
     let mut samples_read: i32 = 0;
     let mut _reserved: u32 = 0;
 
@@ -101,11 +114,13 @@ pub fn register_callback(
     interval: u32,
     buffer: Arc<Mutex<AccumulationBuffer>>,
 ) -> DaqmxResult<Box<CallbackContext>> {
+    let read_buf_size = num_channels * interval as usize;
     let ctx = Box::new(CallbackContext {
         lib: task.lib as *const DaqmxLib,
         handle: task.handle,
         buffer,
         num_channels,
+        read_buf: UnsafeCell::new(vec![0.0f64; read_buf_size]),
         error_count: AtomicU64::new(0),
         lock_fail_count: AtomicU64::new(0),
     });

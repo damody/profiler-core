@@ -210,6 +210,13 @@ impl DaqStreamHandle {
                 format!("Failed to configure timing: {}", e)
             })?;
 
+            // Configure input buffer: 2 seconds to avoid overflow at high sample rates
+            let buf_size = sample_rate * 2;
+            task.cfg_input_buffer(buf_size).map_err(|e| {
+                error!("DAQ: Failed to configure input buffer for device '{}': {}", dev.name, e);
+                format!("Failed to configure input buffer: {}", e)
+            })?;
+
             // Callback interval: ~100ms worth of samples
             let interval = (sample_rate / 10).max(1);
             let buffer = Arc::new(Mutex::new(AccumulationBuffer::new(num_valid)));

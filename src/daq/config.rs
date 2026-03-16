@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::path::Path;
 
 /// RGB color
@@ -153,18 +153,15 @@ fn convert_voltage_in_name(name: &str) -> String {
     result
 }
 
-fn sanitize_name(name: &str) -> Result<String> {
+fn sanitize_name(name: &str) -> String {
     let sanitized = name.replace(',', ";").replace('/', "_").replace('\\', "_");
     for ch in sanitized.chars() {
         if WRONG_SYMBOLS.contains(&ch) {
-            anyhow::bail!(
-                "Channel name '{}' contains illegal character '{}'",
-                name,
-                ch
-            );
+            warn!("Channel name '{}' contains symbol '{}' (may cause issues)", name, ch);
+            break;
         }
     }
-    Ok(sanitized)
+    sanitized
 }
 
 pub fn build_save_name(
@@ -257,6 +254,12 @@ pub fn load_config(path: &Path) -> Result<DaqConfig> {
         if raw_name.is_empty() {
             continue;
         }
+        // Skip placeholder channel names (N/A, NA, None)
+        let name_lower = raw_name.to_lowercase();
+        if name_lower == "n/a" || name_lower == "na" || name_lower == "none" {
+            debug!("DAQ: Skipping placeholder channel '{}' at row {}", raw_name, row);
+            continue;
+        }
         let gain_str = cell_value(ch_sheet, row, 3);
         let offset_str = cell_value(ch_sheet, row, 4);
         let gain = parse_numeric_cell(&gain_str).unwrap_or(1.0);
@@ -294,7 +297,7 @@ pub fn load_config(path: &Path) -> Result<DaqConfig> {
         };
         let color = extract_cell_color(ch_sheet, row, 2);
         let name_converted = convert_voltage_in_name(&raw_name);
-        let name = sanitize_name(&name_converted)?;
+        let name = sanitize_name(&name_converted);
 
         channels.push(ChannelConfig {
             physical_channel,
