@@ -2449,12 +2449,20 @@ pub extern "C" fn profiler_start_tc(
     exclude_kernel: bool,
     diff_kernel: bool,
     top_threads_count: i32,
+    full_mode: bool,
+    custom_events: *const u32,
+    custom_events_count: usize,
     handle_out: *mut u64,
 ) -> ProfilerResult {
     if serial.is_null() || handle_out.is_null() {
         return ProfilerResult::InvalidParameter;
     }
     let serial_str = unsafe { from_wide_ptr(serial) };
+    let events_slice: &[u32] = if custom_events.is_null() || custom_events_count == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(custom_events, custom_events_count) }
+    };
     let rt = crate::runtime();
 
     let mut conns = crate::connections().lock();
@@ -2463,7 +2471,7 @@ pub extern "C" fn profiler_start_tc(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_tc_stream(pid, interval_secs, exclude_kernel, diff_kernel, top_threads_count)) {
+    match rt.block_on(entry.client.start_tc_stream(pid, interval_secs, exclude_kernel, diff_kernel, top_threads_count, full_mode, events_slice)) {
         Ok(stream) => {
             let handle_id = crate::next_tc_handle_id();
             let handle = grpc::streaming::TcStreamHandle::start(rt, stream, 512);

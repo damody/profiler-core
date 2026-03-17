@@ -216,6 +216,8 @@ impl ProfilerClient {
         exclude_kernel: bool,
         diff_kernel: bool,
         top_threads_count: i32,
+        full_mode: bool,
+        custom_events: &[u32],
     ) -> Result<tonic::Streaming<crate::proto::TcDataPoint>> {
         let resp = self
             .inner
@@ -225,6 +227,8 @@ impl ProfilerClient {
                 exclude_kernel,
                 diff_kernel,
                 top_threads_count,
+                custom_events: custom_events.to_vec(),
+                full_mode,
             })
             .await
             .context("StartTcStream RPC failed")?;
