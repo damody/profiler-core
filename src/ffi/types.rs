@@ -236,6 +236,8 @@ pub struct ProfilerCrCpuMetrics {
     pub dtlb_mpki: f64,
     pub itlb_mpki: f64,
     pub branch_miss_rate_pct: f64,
+    pub raw_event_deltas: *mut ProfilerRawEventDelta,
+    pub raw_event_deltas_count: usize,
 }
 
 /// A single cache report data point (one timestamp, multiple CPUs).

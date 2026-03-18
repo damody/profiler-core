@@ -90,6 +90,8 @@ pub extern "C" fn profiler_get_devices(out: *mut ProfilerDeviceList) -> Profiler
                     serial: to_wide_ptr(&d.serial),
                     model: to_wide_ptr(&d.model),
                     state: to_wide_ptr(&d.state),
+                    product: to_wide_ptr(&d.product),
+                    device_name: to_wide_ptr(&d.device_name),
                 })
                 .collect();
 
@@ -128,6 +130,8 @@ pub extern "C" fn profiler_free_devices(list: *mut ProfilerDeviceList) {
                 free_wide_ptr(d.serial);
                 free_wide_ptr(d.model);
                 free_wide_ptr(d.state);
+                free_wide_ptr(d.product);
+                free_wide_ptr(d.device_name);
             }
         }
         (*list).devices = ptr::null_mut();
@@ -2321,29 +2325,49 @@ fn proto_cpus_to_ffi(
     }
     let mut ffi_cpus: Vec<ProfilerCrCpuMetrics> = cpus
         .iter()
-        .map(|c| ProfilerCrCpuMetrics {
-            cpu_num: c.cpu_num,
-            cpu_freq_mhz: c.cpu_freq_mhz,
-            cpu_usage_pct: c.cpu_usage_pct,
-            mips: c.mips,
-            mcps: c.mcps,
-            cpi: c.cpi,
-            execution_mcps: c.execution_mcps,
-            stall_ratio_pct: c.stall_ratio_pct,
-            be_stall_ratio_pct: c.be_stall_ratio_pct,
-            fe_stall_ratio_pct: c.fe_stall_ratio_pct,
-            stall_mcps: c.stall_mcps,
-            l1d_refill_ratio_pct: c.l1d_refill_ratio_pct,
-            l2d_refill_ratio_pct: c.l2d_refill_ratio_pct,
-            l3d_refill_ratio_pct: c.l3d_refill_ratio_pct,
-            llc_read_hit_ratio_pct: c.llc_read_hit_ratio_pct,
-            l1d_mpki: c.l1d_mpki,
-            l2d_mpki: c.l2d_mpki,
-            l3d_mpki: c.l3d_mpki,
-            branch_mpki: c.branch_mpki,
-            dtlb_mpki: c.dtlb_mpki,
-            itlb_mpki: c.itlb_mpki,
-            branch_miss_rate_pct: c.branch_miss_rate_pct,
+        .map(|c| {
+            let (raw_ptr, raw_count) = if c.raw_event_deltas.is_empty() {
+                (ptr::null_mut(), 0)
+            } else {
+                let mut deltas: Vec<ProfilerRawEventDelta> = c
+                    .raw_event_deltas
+                    .iter()
+                    .map(|(&idx, &val)| ProfilerRawEventDelta {
+                        event_index: idx,
+                        delta: val,
+                    })
+                    .collect();
+                let p = deltas.as_mut_ptr();
+                let len = deltas.len();
+                std::mem::forget(deltas);
+                (p, len)
+            };
+            ProfilerCrCpuMetrics {
+                cpu_num: c.cpu_num,
+                cpu_freq_mhz: c.cpu_freq_mhz,
+                cpu_usage_pct: c.cpu_usage_pct,
+                mips: c.mips,
+                mcps: c.mcps,
+                cpi: c.cpi,
+                execution_mcps: c.execution_mcps,
+                stall_ratio_pct: c.stall_ratio_pct,
+                be_stall_ratio_pct: c.be_stall_ratio_pct,
+                fe_stall_ratio_pct: c.fe_stall_ratio_pct,
+                stall_mcps: c.stall_mcps,
+                l1d_refill_ratio_pct: c.l1d_refill_ratio_pct,
+                l2d_refill_ratio_pct: c.l2d_refill_ratio_pct,
+                l3d_refill_ratio_pct: c.l3d_refill_ratio_pct,
+                llc_read_hit_ratio_pct: c.llc_read_hit_ratio_pct,
+                l1d_mpki: c.l1d_mpki,
+                l2d_mpki: c.l2d_mpki,
+                l3d_mpki: c.l3d_mpki,
+                branch_mpki: c.branch_mpki,
+                dtlb_mpki: c.dtlb_mpki,
+                itlb_mpki: c.itlb_mpki,
+                branch_miss_rate_pct: c.branch_miss_rate_pct,
+                raw_event_deltas: raw_ptr,
+                raw_event_deltas_count: raw_count,
+            }
         })
         .collect();
     let p = ffi_cpus.as_mut_ptr();
@@ -2400,6 +2424,22 @@ pub extern "C" fn profiler_stop_cr(handle: u64) -> ProfilerResult {
     }
 }
 
+/// Free raw_event_deltas inside each element of a CrCpuMetrics array.
+unsafe fn free_cr_cpu_raw_deltas(ptr: *mut ProfilerCrCpuMetrics, count: usize) {
+    for i in 0..count {
+        let cpu = &mut *ptr.add(i);
+        if !cpu.raw_event_deltas.is_null() && cpu.raw_event_deltas_count > 0 {
+            drop(Vec::from_raw_parts(
+                cpu.raw_event_deltas,
+                cpu.raw_event_deltas_count,
+                cpu.raw_event_deltas_count,
+            ));
+            cpu.raw_event_deltas = ptr::null_mut();
+            cpu.raw_event_deltas_count = 0;
+        }
+    }
+}
+
 /// Free the dynamic arrays inside a `ProfilerCrData`.
 #[no_mangle]
 pub extern "C" fn profiler_free_cr_data(data: *mut ProfilerCrData) {
@@ -2410,6 +2450,7 @@ pub extern "C" fn profiler_free_cr_data(data: *mut ProfilerCrData) {
         let cpus_ptr = (*data).cpus;
         let cpus_count = (*data).cpus_count;
         if !cpus_ptr.is_null() && cpus_count > 0 {
+            free_cr_cpu_raw_deltas(cpus_ptr, cpus_count);
             drop(Vec::from_raw_parts(cpus_ptr, cpus_count, cpus_count));
         }
         (*data).cpus = ptr::null_mut();
@@ -2418,6 +2459,7 @@ pub extern "C" fn profiler_free_cr_data(data: *mut ProfilerCrData) {
         let kernel_cpus_ptr = (*data).kernel_cpus;
         let kernel_cpus_count = (*data).kernel_cpus_count;
         if !kernel_cpus_ptr.is_null() && kernel_cpus_count > 0 {
+            free_cr_cpu_raw_deltas(kernel_cpus_ptr, kernel_cpus_count);
             drop(Vec::from_raw_parts(kernel_cpus_ptr, kernel_cpus_count, kernel_cpus_count));
         }
         (*data).kernel_cpus = ptr::null_mut();
@@ -2426,6 +2468,7 @@ pub extern "C" fn profiler_free_cr_data(data: *mut ProfilerCrData) {
         let include_cpus_ptr = (*data).include_cpus;
         let include_cpus_count = (*data).include_cpus_count;
         if !include_cpus_ptr.is_null() && include_cpus_count > 0 {
+            free_cr_cpu_raw_deltas(include_cpus_ptr, include_cpus_count);
             drop(Vec::from_raw_parts(include_cpus_ptr, include_cpus_count, include_cpus_count));
         }
         (*data).include_cpus = ptr::null_mut();
