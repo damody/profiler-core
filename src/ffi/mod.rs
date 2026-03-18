@@ -2496,24 +2496,45 @@ fn proto_tc_threads_to_ffi(
     }
     let mut ffi: Vec<ProfilerTcThreadMetrics> = threads
         .iter()
-        .map(|t| ProfilerTcThreadMetrics {
-            thread_id: t.thread_id,
-            thread_name: to_wide_ptr(&t.thread_name),
-            mips: t.mips,
-            mcps: t.mcps,
-            cpi: t.cpi,
-            cpu_usage_pct: t.cpu_usage_pct,
-            l1d_refill_ratio_pct: t.l1d_refill_ratio_pct,
-            l1i_refill_ratio_pct: t.l1i_refill_ratio_pct,
-            l2d_refill_ratio_pct: t.l2d_refill_ratio_pct,
-            l3d_refill_ratio_pct: t.l3d_refill_ratio_pct,
-            stall_ratio_pct: t.stall_ratio_pct,
-            be_stall_ratio_pct: t.be_stall_ratio_pct,
-            fe_stall_ratio_pct: t.fe_stall_ratio_pct,
-            stall_mcps: t.stall_mcps,
-            be_stall_mcps: t.be_stall_mcps,
-            fe_stall_mcps: t.fe_stall_mcps,
-            memory_instruction_pct: t.memory_instruction_pct,
+        .map(|t| {
+            // Convert raw_event_deltas map to FFI array
+            let (raw_ptr, raw_count) = if t.raw_event_deltas.is_empty() {
+                (ptr::null_mut(), 0)
+            } else {
+                let mut deltas: Vec<ProfilerRawEventDelta> = t
+                    .raw_event_deltas
+                    .iter()
+                    .map(|(&idx, &val)| ProfilerRawEventDelta {
+                        event_index: idx,
+                        delta: val,
+                    })
+                    .collect();
+                let p = deltas.as_mut_ptr();
+                let c = deltas.len();
+                std::mem::forget(deltas);
+                (p, c)
+            };
+            ProfilerTcThreadMetrics {
+                thread_id: t.thread_id,
+                thread_name: to_wide_ptr(&t.thread_name),
+                mips: t.mips,
+                mcps: t.mcps,
+                cpi: t.cpi,
+                cpu_usage_pct: t.cpu_usage_pct,
+                l1d_refill_ratio_pct: t.l1d_refill_ratio_pct,
+                l1i_refill_ratio_pct: t.l1i_refill_ratio_pct,
+                l2d_refill_ratio_pct: t.l2d_refill_ratio_pct,
+                l3d_refill_ratio_pct: t.l3d_refill_ratio_pct,
+                stall_ratio_pct: t.stall_ratio_pct,
+                be_stall_ratio_pct: t.be_stall_ratio_pct,
+                fe_stall_ratio_pct: t.fe_stall_ratio_pct,
+                stall_mcps: t.stall_mcps,
+                be_stall_mcps: t.be_stall_mcps,
+                fe_stall_mcps: t.fe_stall_mcps,
+                memory_instruction_pct: t.memory_instruction_pct,
+                raw_event_deltas: raw_ptr,
+                raw_event_deltas_count: raw_count,
+            }
         })
         .collect();
     let p = ffi.as_mut_ptr();
@@ -2575,6 +2596,15 @@ unsafe fn free_tc_thread_array(ptr: *mut ProfilerTcThreadMetrics, count: usize) 
             if !thread.thread_name.is_null() {
                 free_wide_ptr(thread.thread_name);
                 thread.thread_name = ptr::null_mut();
+            }
+            if !thread.raw_event_deltas.is_null() && thread.raw_event_deltas_count > 0 {
+                drop(Vec::from_raw_parts(
+                    thread.raw_event_deltas,
+                    thread.raw_event_deltas_count,
+                    thread.raw_event_deltas_count,
+                ));
+                thread.raw_event_deltas = ptr::null_mut();
+                thread.raw_event_deltas_count = 0;
             }
         }
         drop(Vec::from_raw_parts(ptr, count, count));

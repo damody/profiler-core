@@ -22,6 +22,10 @@ pub struct ProfilerDevice {
     pub model: *mut u16,
     /// Null-terminated UTF-16 state (e.g. "device", "offline").
     pub state: *mut u16,
+    /// Null-terminated UTF-16 product name (from `product:` field).
+    pub product: *mut u16,
+    /// Null-terminated UTF-16 device codename (from `device:` field).
+    pub device_name: *mut u16,
 }
 
 /// A list of devices returned to C#.
@@ -278,6 +282,14 @@ pub struct ProfilerRtbSummary {
 // Thread Cache (TC) types
 // ---------------------------------------------------------------------------
 
+/// A single raw PMU event delta (index + count).
+#[repr(C)]
+pub struct ProfilerRawEventDelta {
+    pub event_index: u32,
+    // 4 bytes padding (u64 alignment)
+    pub delta: u64,
+}
+
 /// Per-thread cache metrics.
 #[repr(C)]
 pub struct ProfilerTcThreadMetrics {
@@ -298,6 +310,8 @@ pub struct ProfilerTcThreadMetrics {
     pub be_stall_mcps: f64,
     pub fe_stall_mcps: f64,
     pub memory_instruction_pct: f64,
+    pub raw_event_deltas: *mut ProfilerRawEventDelta,
+    pub raw_event_deltas_count: usize,
 }
 
 /// A single thread cache data point (one timestamp, multiple threads).
