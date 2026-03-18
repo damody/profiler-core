@@ -22,4 +22,6 @@ pub struct DeviceInfo {
     pub serial: String,
     pub model: String,
     pub state: String,
+    pub product: String,
+    pub device_name: String,
 }

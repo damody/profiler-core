@@ -26,6 +26,8 @@ fn parse_devices_output(output: &str) -> Result<Vec<DeviceInfo>> {
     // or simply:
     //   SERIAL           STATE
     let model_re = Regex::new(r"model:(\S+)").unwrap();
+    let product_re = Regex::new(r"product:(\S+)").unwrap();
+    let device_re = Regex::new(r"device:(\S+)").unwrap();
     let mut devices = Vec::new();
 
     for line in output.lines() {
@@ -49,10 +51,24 @@ fn parse_devices_output(output: &str) -> Result<Vec<DeviceInfo>> {
             .map(|m| m.as_str().replace('_', " "))
             .unwrap_or_default();
 
+        let product = product_re
+            .captures(line)
+            .and_then(|cap| cap.get(1))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+
+        let device_name = device_re
+            .captures(line)
+            .and_then(|cap| cap.get(1))
+            .map(|m| m.as_str().replace('_', " "))
+            .unwrap_or_default();
+
         devices.push(DeviceInfo {
             serial,
             model,
             state,
+            product,
+            device_name,
         });
     }
 
@@ -76,7 +92,11 @@ R5CR1234567         device usb:1-1 product:gts9uwifi model:SM_X710 device:gts9uw
         assert_eq!(devices[0].serial, "R5CR1234567");
         assert_eq!(devices[0].state, "device");
         assert_eq!(devices[0].model, "SM X710");
+        assert_eq!(devices[0].product, "gts9uwifi");
+        assert_eq!(devices[0].device_name, "gts9uwifi");
         assert_eq!(devices[1].serial, "192.168.1.100:5555");
         assert_eq!(devices[1].model, "Pixel 7");
+        assert_eq!(devices[1].product, "phone");
+        assert_eq!(devices[1].device_name, "panther");
     }
 }
