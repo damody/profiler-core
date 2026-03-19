@@ -341,7 +341,7 @@ impl DaqStreamHandle {
                 }
             }
 
-            let poll_interval = std::time::Duration::from_millis(500);
+            let poll_interval = std::time::Duration::from_millis(100);
             let mut poll_count: u64 = 0;
             let mut total_samples_collected: u64 = 0;
 
