@@ -1,9 +1,13 @@
-use libloading::{Library, Symbol};
 use std::ffi::c_char;
 use std::os::raw::{c_double, c_int, c_uint};
+use std::sync::OnceLock;
+
+use libloading::{Library, Symbol};
 
 use super::constants::TaskHandle;
 use super::error::{DaqmxError, DaqmxResult};
+
+static DAQMX_LIB: OnceLock<Result<DaqmxLib, String>> = OnceLock::new();
 
 /// Callback type for DAQmxRegisterEveryNSamplesEvent
 pub type EveryNSamplesCallback = unsafe extern "C" fn(
@@ -91,7 +95,20 @@ unsafe impl Send for DaqmxLib {}
 unsafe impl Sync for DaqmxLib {}
 
 impl DaqmxLib {
-    pub fn load() -> DaqmxResult<Self> {
+    /// Get or load the singleton DaqmxLib instance.
+    /// The library is loaded once and never unloaded, because NI-DAQmx
+    /// does not support being unloaded and reloaded within the same process.
+    pub fn get_or_load() -> DaqmxResult<&'static Self> {
+        let result = DAQMX_LIB.get_or_init(|| {
+            Self::load_inner().map_err(|e| e.to_string())
+        });
+        match result {
+            Ok(lib) => Ok(lib),
+            Err(e) => Err(DaqmxError::LibraryNotFound(e.clone())),
+        }
+    }
+
+    fn load_inner() -> DaqmxResult<Self> {
         let lib = unsafe { Library::new("nicaiu.dll") }.map_err(|e| {
             DaqmxError::LibraryNotFound(format!(
                 "Cannot load NI-DAQmx driver (nicaiu.dll). Install NI-DAQmx from ni.com: {}",

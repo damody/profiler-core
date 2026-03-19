@@ -67,7 +67,6 @@ unsafe extern "C" fn every_n_callback(
     read_buf[..needed].fill(0.0);
 
     let mut samples_read: i32 = 0;
-    let mut _reserved: u32 = 0;
 
     let code = ((*ctx.lib).read_analog_f64)(
         ctx.handle,
@@ -77,7 +76,7 @@ unsafe extern "C" fn every_n_callback(
         read_buf.as_mut_ptr(),
         total_read,
         &mut samples_read,
-        &mut _reserved as *mut u32,
+        std::ptr::null_mut(),
     );
 
     if code >= 0 {

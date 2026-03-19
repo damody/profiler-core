@@ -11,7 +11,9 @@ use super::device::DeviceInfo;
 use super::ffi_daqmx::DaqmxLib;
 use super::reader::{AccumulationBuffer, register_callback};
 use super::scale;
+use super::avro_writer::DaqAvroWriter;
 use super::stats;
+use super::stats::{RunningStats, RunningPower};
 use super::task::DaqTask;
 
 /// A single poll result pushed to the queue
@@ -73,12 +75,10 @@ pub struct DaqStreamHandle {
     thread_handle: Option<std::thread::JoinHandle<DaqSessionResult>>,
 }
 
-/// Result carried by the background thread
+/// Result carried by the background thread (no raw samples — stats are incremental)
 struct DaqSessionResult {
-    all_samples: Vec<Vec<f64>>,
-    channel_metas: Vec<ChannelMeta>,
-    #[allow(dead_code)]
-    sample_rate: f64,
+    channel_stats: Vec<(ChannelMeta, stats::Stats)>,
+    power_stats: Vec<(String, f64)>, // (pair_name, avg_power_watts)
     start_time: Instant,
 }
 
@@ -89,16 +89,17 @@ impl DaqStreamHandle {
         terminal_diff: bool,
         max_voltage: f64,
         min_voltage: f64,
+        output_path: Option<String>,
     ) -> Result<Self, String> {
         info!("DAQ: Loading NI-DAQmx library...");
-        let lib = DaqmxLib::load().map_err(|e| {
+        let lib = DaqmxLib::get_or_load().map_err(|e| {
             error!("DAQ: Failed to load NI-DAQmx library: {}", e);
             e.to_string()
         })?;
         info!("DAQ: NI-DAQmx library loaded successfully");
 
         info!("DAQ: Enumerating devices...");
-        let devices = super::device::enumerate_devices(&lib).map_err(|e| {
+        let devices = super::device::enumerate_devices(lib).map_err(|e| {
             error!("DAQ: Device enumeration failed: {}", e);
             e.to_string()
         })?;
@@ -121,16 +122,13 @@ impl DaqStreamHandle {
         // We need to keep tasks and callback contexts alive
         let mut task_handles: Vec<constants::TaskHandle> = Vec::new();
 
-        // We store raw pointers to keep DaqmxLib alive in the thread
-        let lib = Arc::new(lib);
-
         for dev in &devices {
             let dev_channels = channels_for_device(config, dev);
             if dev_channels.is_empty() {
                 continue;
             }
 
-            let lib_ref: &DaqmxLib = &lib;
+            let lib_ref: &DaqmxLib = lib;
 
             // Create scales
             let mut scale_names: Vec<String> = Vec::new();
@@ -256,18 +254,93 @@ impl DaqStreamHandle {
         let error_queue_clone = error_queue.clone();
         let channel_metas_clone = all_channel_metas.clone();
         let rate = sample_rate as f64;
-        let lib_clone = lib.clone();
 
         info!("DAQ: Starting background streaming thread with {} channels", all_channel_metas.len());
 
         // Background thread: periodically drain buffers, compute power, push to queue
         let thread_handle = std::thread::spawn(move || {
-            let start_time = Instant::now();
-            // Accumulate all samples for final summary
-            let total_channels: usize = all_channel_metas.len();
-            let mut cumulative_samples: Vec<Vec<f64>> = (0..total_channels).map(|_| Vec::new()).collect();
+            use std::io::Write;
 
-            // Compute how many samples correspond to the poll interval (~500ms)
+            let start_time = Instant::now();
+            let total_channels: usize = all_channel_metas.len();
+            let dt = 1.0 / rate;
+
+            // Incremental statistics (replaces cumulative_samples)
+            let mut running_stats: Vec<RunningStats> = (0..total_channels).map(|_| RunningStats::new()).collect();
+
+            // Build sorted power-pair index list + RunningPower accumulators
+            let mut pair_indices_set: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+            for meta in &channel_metas_clone {
+                if let Some((idx, _)) = meta.power_pair {
+                    pair_indices_set.insert(idx);
+                }
+            }
+            let pair_indices: Vec<u32> = pair_indices_set.into_iter().collect();
+            let mut running_powers: Vec<(u32, String, RunningPower)> = pair_indices.iter().map(|&idx| {
+                // Determine pair name (voltage channel name)
+                let mut name = String::new();
+                for meta in &channel_metas_clone {
+                    if let Some((pidx, is_current)) = meta.power_pair {
+                        if pidx == idx && !is_current {
+                            name = meta.name.clone();
+                        }
+                    }
+                }
+                if name.is_empty() {
+                    // Fallback to current channel name
+                    for meta in &channel_metas_clone {
+                        if let Some((pidx, is_current)) = meta.power_pair {
+                            if pidx == idx && is_current {
+                                name = meta.name.clone();
+                            }
+                        }
+                    }
+                }
+                (idx, name, RunningPower::new())
+            }).collect();
+
+            // File writer (CSV or Avro, opened if output_path is Some)
+            enum DaqFileWriter {
+                Csv(std::io::BufWriter<std::fs::File>),
+                Avro(DaqAvroWriter),
+            }
+            let mut file_writer: Option<DaqFileWriter> = None;
+            let mut file_sample_index: u64 = 0;
+            if let Some(ref path) = output_path {
+                if path.ends_with(".avro") {
+                    let names: Vec<String> = channel_metas_clone.iter().map(|m| m.name.clone()).collect();
+                    match DaqAvroWriter::new(path, &names) {
+                        Ok(w) => {
+                            file_writer = Some(DaqFileWriter::Avro(w));
+                        }
+                        Err(e) => {
+                            let msg = format!("Avro create failed: {}", e);
+                            error!("DAQ: {}", msg);
+                            let _ = error_queue_clone.push(msg);
+                        }
+                    }
+                } else {
+                    match std::fs::File::create(path) {
+                        Ok(file) => {
+                            let mut w = std::io::BufWriter::new(file);
+                            // Write header
+                            let _ = write!(w, "timestamp_s");
+                            for meta in &channel_metas_clone {
+                                let _ = write!(w, ",{}", meta.name);
+                            }
+                            let _ = writeln!(w);
+                            file_writer = Some(DaqFileWriter::Csv(w));
+                            info!("DAQ: CSV streaming to {}", path);
+                        }
+                        Err(e) => {
+                            let msg = format!("CSV create failed: {}", e);
+                            error!("DAQ: {}", msg);
+                            let _ = error_queue_clone.push(msg);
+                        }
+                    }
+                }
+            }
+
             let poll_interval = std::time::Duration::from_millis(500);
             let mut poll_count: u64 = 0;
             let mut total_samples_collected: u64 = 0;
@@ -304,17 +377,62 @@ impl DaqStreamHandle {
                     continue;
                 }
 
-                // Accumulate for summary
                 let chunk_sample_count: usize = chunk_data.iter().map(|ch| ch.len()).max().unwrap_or(0);
                 total_samples_collected += chunk_sample_count as u64;
-                for (i, ch) in chunk_data.iter().enumerate() {
-                    cumulative_samples[i].extend_from_slice(ch);
-                }
                 poll_count += 1;
+
+                // Update incremental stats
+                for (i, ch) in chunk_data.iter().enumerate() {
+                    running_stats[i].update_slice(ch);
+                }
+
+                // Update incremental power
+                for (pair_idx, _, rp) in running_powers.iter_mut() {
+                    let mut current_data: Option<&Vec<f64>> = None;
+                    let mut voltage_data: Option<&Vec<f64>> = None;
+                    for (i, meta) in channel_metas_clone.iter().enumerate() {
+                        if let Some((pidx, is_current)) = meta.power_pair {
+                            if pidx == *pair_idx {
+                                if is_current { current_data = Some(&chunk_data[i]); }
+                                else { voltage_data = Some(&chunk_data[i]); }
+                            }
+                        }
+                    }
+                    if let (Some(v), Some(c)) = (voltage_data, current_data) {
+                        rp.update(v, c);
+                    }
+                }
+
+                // Write file rows incrementally (CSV or Avro)
+                match file_writer {
+                    Some(DaqFileWriter::Csv(ref mut w)) => {
+                        for sample_i in 0..chunk_sample_count {
+                            let _ = write!(w, "{:.6}", file_sample_index as f64 * dt);
+                            for ch in &chunk_data {
+                                if sample_i < ch.len() {
+                                    let _ = write!(w, ",{:.6}", ch[sample_i]);
+                                } else {
+                                    let _ = write!(w, ",");
+                                }
+                            }
+                            let _ = writeln!(w);
+                            file_sample_index += 1;
+                        }
+                        let _ = w.flush();
+                    }
+                    Some(DaqFileWriter::Avro(ref mut w)) => {
+                        if let Err(e) = w.write_chunk(&chunk_data, &mut file_sample_index, dt) {
+                            let msg = format!("Avro write error: {}", e);
+                            error!("DAQ: {}", msg);
+                            let _ = error_queue_clone.push(msg);
+                        }
+                    }
+                    None => {}
+                }
 
                 let elapsed_ms = start_time.elapsed().as_millis() as u64;
 
-                // Compute per-channel means for this chunk
+                // Compute per-channel means for this chunk (for live display)
                 let mut channel_values: Vec<(String, f64)> = Vec::new();
                 for (i, ch_data) in chunk_data.iter().enumerate() {
                     let mean = if ch_data.is_empty() {
@@ -325,52 +443,25 @@ impl DaqStreamHandle {
                     channel_values.push((channel_metas_clone[i].name.clone(), mean));
                 }
 
-                // Compute per-power-pair power
+                // Compute per-power-pair power for this chunk (for live display)
                 let mut power_pairs: Vec<(String, f64)> = Vec::new();
-                let mut pair_indices: std::collections::HashSet<u32> = std::collections::HashSet::new();
-                for meta in &channel_metas_clone {
-                    if let Some((idx, _)) = meta.power_pair {
-                        pair_indices.insert(idx);
-                    }
-                }
-                let mut pair_indices: Vec<u32> = pair_indices.into_iter().collect();
-                pair_indices.sort();
-
-                for pair_idx in &pair_indices {
-                    // Find current and voltage channels for this pair
+                for (pair_idx, pair_name, _) in &running_powers {
                     let mut current_data: Option<&Vec<f64>> = None;
                     let mut voltage_data: Option<&Vec<f64>> = None;
-                    let mut current_name = String::new();
-                    let mut voltage_name = String::new();
 
                     for (i, meta) in channel_metas_clone.iter().enumerate() {
-                        if let Some((idx, is_current)) = meta.power_pair {
-                            if idx == *pair_idx {
-                                if is_current {
-                                    current_data = Some(&chunk_data[i]);
-                                    current_name = meta.name.clone();
-                                } else {
-                                    voltage_data = Some(&chunk_data[i]);
-                                    voltage_name = meta.name.clone();
-                                }
+                        if let Some((pidx, is_current)) = meta.power_pair {
+                            if pidx == *pair_idx {
+                                if is_current { current_data = Some(&chunk_data[i]); }
+                                else { voltage_data = Some(&chunk_data[i]); }
                             }
                         }
                     }
 
                     if let (Some(v_data), Some(i_data)) = (voltage_data, current_data) {
-                        // V * I = power (already in scaled units from gain/offset)
-                        // Result is in watts if V is volts and I is amps
-                        // Convert to mW
                         let power_w = stats::compute_power(v_data, i_data);
                         let power_mw = power_w * 1000.0;
-
-                        // Use voltage channel name as pair name (remove I/V suffix)
-                        let pair_name = if !voltage_name.is_empty() {
-                            voltage_name
-                        } else {
-                            current_name
-                        };
-                        power_pairs.push((pair_name, power_mw));
+                        power_pairs.push((pair_name.clone(), power_mw));
                     }
                 }
 
@@ -391,19 +482,35 @@ impl DaqStreamHandle {
                 }
             }
 
+            // Flush and close file writer
+            match file_writer {
+                Some(DaqFileWriter::Csv(mut w)) => {
+                    let _ = w.flush();
+                }
+                Some(DaqFileWriter::Avro(w)) => {
+                    if let Err(e) = w.finish() {
+                        error!("DAQ: Avro finish error: {}", e);
+                    }
+                }
+                None => {}
+            }
+            if let Some(ref path) = output_path {
+                info!("DAQ: Output completed: {}", path);
+            }
+
             info!("DAQ: Streaming stopped after {:.1}s, {} polls, {} total samples",
                 start_time.elapsed().as_secs_f64(), poll_count, total_samples_collected);
 
             // Clean up: stop and clear all tasks
             for (i, &handle) in task_handles.iter().enumerate() {
                 unsafe {
-                    let stop_code = (lib_clone.stop_task)(handle);
+                    let stop_code = (lib.stop_task)(handle);
                     if stop_code != 0 {
                         let msg = format!("stop_task[{}] returned error code {}", i, stop_code);
                         warn!("DAQ: {}", msg);
                         let _ = error_queue_clone.push(msg);
                     }
-                    let clear_code = (lib_clone.clear_task)(handle);
+                    let clear_code = (lib.clear_task)(handle);
                     if clear_code != 0 {
                         let msg = format!("clear_task[{}] returned error code {}", i, clear_code);
                         warn!("DAQ: {}", msg);
@@ -413,10 +520,24 @@ impl DaqStreamHandle {
             }
             info!("DAQ: All tasks cleaned up");
 
+            // Build result from incremental stats
+            let channel_stats: Vec<(ChannelMeta, stats::Stats)> = channel_metas_clone
+                .into_iter()
+                .zip(running_stats.into_iter())
+                .map(|(meta, rs)| {
+                    let s = rs.finalize();
+                    (meta, s)
+                })
+                .collect();
+
+            let power_stats: Vec<(String, f64)> = running_powers
+                .into_iter()
+                .map(|(_, name, rp)| (name, rp.finalize()))
+                .collect();
+
             DaqSessionResult {
-                all_samples: cumulative_samples,
-                channel_metas: channel_metas_clone,
-                sample_rate: rate,
+                channel_stats,
+                power_stats,
                 start_time,
             }
         });
@@ -443,7 +564,8 @@ impl DaqStreamHandle {
         errors
     }
 
-    /// Stop the streaming session and return summary statistics
+    /// Stop the streaming session and return summary statistics.
+    /// CSV was already written incrementally during recording (if csv_path was provided at start).
     pub fn stop(mut self) -> Result<DaqSummary, String> {
         info!("DAQ: Stopping streaming session...");
         self.cancelled.store(true, Ordering::Relaxed);
@@ -470,10 +592,9 @@ impl DaqStreamHandle {
 
         let measurement_time_s = result.start_time.elapsed().as_secs_f64();
 
-        // Compute per-channel stats
+        // Build per-channel summaries from pre-computed stats
         let mut channel_summaries = Vec::new();
-        for (i, meta) in result.channel_metas.iter().enumerate() {
-            let s = stats::compute_stats(&result.all_samples[i]);
+        for (meta, s) in &result.channel_stats {
             let (is_current, pair_index) = match meta.power_pair {
                 Some((idx, is_c)) => (is_c, idx as i32),
                 None => (false, -1),
@@ -492,52 +613,16 @@ impl DaqStreamHandle {
             });
         }
 
-        // Compute power breakdown
-        let mut pair_indices: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-        for meta in &result.channel_metas {
-            if let Some((idx, _)) = meta.power_pair {
-                pair_indices.insert(idx);
-            }
-        }
-
+        // Build power breakdown from pre-computed power stats
         let mut power_breakdown = Vec::new();
         let mut total_power_mw = 0.0;
-
-        for pair_idx in &pair_indices {
-            let mut current_samples: Option<&Vec<f64>> = None;
-            let mut voltage_samples: Option<&Vec<f64>> = None;
-            let mut voltage_name = String::new();
-            let mut current_name = String::new();
-
-            for (i, meta) in result.channel_metas.iter().enumerate() {
-                if let Some((idx, is_current)) = meta.power_pair {
-                    if idx == *pair_idx {
-                        if is_current {
-                            current_samples = Some(&result.all_samples[i]);
-                            current_name = meta.name.clone();
-                        } else {
-                            voltage_samples = Some(&result.all_samples[i]);
-                            voltage_name = meta.name.clone();
-                        }
-                    }
-                }
-            }
-
-            if let (Some(v), Some(i)) = (voltage_samples, current_samples) {
-                let power_w = stats::compute_power(v, i);
-                let power_mw = power_w * 1000.0;
-                total_power_mw += power_mw;
-
-                let pair_name = if !voltage_name.is_empty() {
-                    voltage_name
-                } else {
-                    current_name
-                };
-                power_breakdown.push(DaqPowerPairSummary {
-                    name: pair_name,
-                    avg_power_mw: power_mw,
-                });
-            }
+        for (name, avg_power_w) in &result.power_stats {
+            let power_mw = avg_power_w * 1000.0;
+            total_power_mw += power_mw;
+            power_breakdown.push(DaqPowerPairSummary {
+                name: name.clone(),
+                avg_power_mw: power_mw,
+            });
         }
 
         info!("DAQ: Summary computed — {} channels, {} power pairs, total {:.1} mW, {:.1}s",

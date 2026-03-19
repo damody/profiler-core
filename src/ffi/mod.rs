@@ -3303,7 +3303,7 @@ pub extern "C" fn profiler_daq_list_devices(list: *mut ProfilerDaqDeviceList) ->
         return ProfilerResult::InvalidParameter;
     }
 
-    let lib = match crate::daq::DaqmxLib::load() {
+    let lib = match crate::daq::DaqmxLib::get_or_load() {
         Ok(l) => l,
         Err(e) => {
             crate::set_last_error(e.to_string());
@@ -3508,6 +3508,8 @@ pub extern "C" fn profiler_daq_free_config_info(info: *mut ProfilerDaqConfigInfo
 }
 
 /// Start DAQ streaming. Returns a stream handle.
+/// `output_path` is an optional UTF-16 null-terminated path for streaming output (can be null).
+/// Use `.avro` extension for Apache Avro format, otherwise CSV.
 #[no_mangle]
 pub extern "C" fn profiler_daq_start(
     config_handle: u64,
@@ -3515,11 +3517,18 @@ pub extern "C" fn profiler_daq_start(
     terminal_diff: bool,
     max_voltage: f64,
     min_voltage: f64,
+    output_path: *const u16,
     out_handle: *mut u64,
 ) -> ProfilerResult {
     if out_handle.is_null() {
         return ProfilerResult::InvalidParameter;
     }
+
+    let csv_str = if output_path.is_null() {
+        None
+    } else {
+        Some(unsafe { from_wide_ptr(output_path) })
+    };
 
     let config = {
         let configs = crate::daq_configs().lock();
@@ -3538,6 +3547,7 @@ pub extern "C" fn profiler_daq_start(
         terminal_diff,
         max_voltage,
         min_voltage,
+        csv_str,
     ) {
         Ok(handle) => {
             let id = crate::next_daq_handle_id();
@@ -3721,6 +3731,7 @@ pub extern "C" fn profiler_daq_free_poll_data(data: *mut ProfilerDaqPollData) {
 }
 
 /// Stop DAQ streaming and return summary.
+/// CSV was already written incrementally during recording (if csv_path was provided at start).
 #[no_mangle]
 pub extern "C" fn profiler_daq_stop(
     handle: u64,

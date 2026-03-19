@@ -47,4 +47,4 @@ pub const DAQmx_Val_WaitInfinitely: f64 = -1.0;
 pub const DAQmx_Val_Acquired_Into_Buffer: i32 = 1;
 
 // Task handle type
-pub type TaskHandle = u32;
+pub type TaskHandle = usize;
