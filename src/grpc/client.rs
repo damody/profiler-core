@@ -11,7 +11,7 @@ use crate::proto::{
     InputTapRequest, InputTextRequest, InstallApkRequest, ListPackagesRequest, PackageRequest,
     PathExistsRequest, PerfettoRequest, PerfettoResponse, PullFileRequest, RemoveFileRequest,
     RtbStreamRequest, RtbSummaryRequest, ScreenshotRequest, SetChargingRequest, ShellRequest,
-    StopResponse, TcStreamRequest,
+    StopRecordingRequest, StopResponse, TcStreamRequest,
 };
 
 /// High-level wrapper around the gRPC ProfilerServiceClient.
@@ -318,11 +318,14 @@ impl ProfilerClient {
         Ok(())
     }
 
-    /// Stop the current recording on the daemon.
-    pub async fn stop_recording(&mut self) -> Result<StopResponse> {
+    /// Stop recording on the daemon.
+    /// If `session_type` is empty, stops all sessions.
+    pub async fn stop_recording(&mut self, session_type: &str) -> Result<StopResponse> {
         let resp = self
             .inner
-            .stop_recording(Empty {})
+            .stop_recording(StopRecordingRequest {
+                session_type: session_type.to_string(),
+            })
             .await
             .context("StopRecording RPC failed")?
             .into_inner();

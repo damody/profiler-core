@@ -862,13 +862,23 @@ pub extern "C" fn profiler_pull_file(
 // Stop recording
 // ---------------------------------------------------------------------------
 
-/// Tell the daemon to stop the current recording session.
+/// Tell the daemon to stop a recording session.
+/// `session_type` specifies which session to stop ("rtb", "cr", "tc", "cml", "gc", "perfetto").
+/// If null or empty, stops all sessions.
 #[no_mangle]
-pub extern "C" fn profiler_stop_recording(serial: *const u16) -> ProfilerResult {
+pub extern "C" fn profiler_stop_recording(
+    serial: *const u16,
+    session_type: *const u16,
+) -> ProfilerResult {
     if serial.is_null() {
         return ProfilerResult::InvalidParameter;
     }
     let serial_str = unsafe { from_wide_ptr(serial) };
+    let type_str = if session_type.is_null() {
+        String::new()
+    } else {
+        unsafe { from_wide_ptr(session_type) }
+    };
     let rt = crate::runtime();
 
     let mut conns = crate::connections().lock();
@@ -877,7 +887,7 @@ pub extern "C" fn profiler_stop_recording(serial: *const u16) -> ProfilerResult 
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.stop_recording()) {
+    match rt.block_on(entry.client.stop_recording(&type_str)) {
         Ok(_) => ProfilerResult::Ok,
         Err(e) => {
             log::error!("profiler_stop_recording: {e:#}");
