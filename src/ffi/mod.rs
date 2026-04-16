@@ -483,6 +483,7 @@ fn default_rtb_options_for_mode(mode: &str) -> grpc::client::RtbStreamOptions {
             enable_fps_queue: false,
             enable_fps_present_fence: true,
             enable_gpu: false,
+            use_dumpsys_fps: false,
         }
     } else {
         grpc::client::RtbStreamOptions::default()
@@ -537,6 +538,7 @@ pub extern "C" fn profiler_start_rtb_ex(
             enable_fps_queue: o.enable_fps_queue,
             enable_fps_present_fence: o.enable_fps_present_fence,
             enable_gpu: o.enable_gpu,
+            use_dumpsys_fps: o.use_dumpsys_fps,
         }
     };
     let rt = crate::runtime();

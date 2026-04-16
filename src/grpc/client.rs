@@ -65,6 +65,7 @@ pub struct RtbStreamOptions {
     pub enable_fps_queue: bool,
     pub enable_fps_present_fence: bool,
     pub enable_gpu: bool,
+    pub use_dumpsys_fps: bool,
 }
 
 impl Default for RtbStreamOptions {
@@ -76,6 +77,7 @@ impl Default for RtbStreamOptions {
             enable_fps_queue: true,
             enable_fps_present_fence: true,
             enable_gpu: true,
+            use_dumpsys_fps: false,
         }
     }
 }
@@ -158,6 +160,7 @@ impl ProfilerClient {
                 enable_fps_queue: options.enable_fps_queue,
                 enable_fps_present_fence: options.enable_fps_present_fence,
                 enable_gpu: options.enable_gpu,
+                use_dumpsys_fps: options.use_dumpsys_fps,
             })
             .await
             .context("StartRtbStream RPC failed")?;
