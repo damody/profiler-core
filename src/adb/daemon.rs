@@ -123,7 +123,11 @@ async fn start_daemon(serial: &str, remote_path: &str, grpc_port: u16) -> Result
         .map(|(d, _)| d)
         .unwrap_or("/data/local/tmp");
     let ld_env = format!("LD_LIBRARY_PATH={remote_dir}");
-    let daemon_args = format!("{remote_path} --daemon --grpc-port {grpc_port}");
+    // 預設啟用 --low-overhead：pin LCPU、nice=10、嘗試 SCHED_IDLE、強制不用 dumpsys、quiet。
+    // 桌面端錄 GameReport / Mperf 為主要使用情境，daemon 不應擠壓遊戲關鍵線程。
+    let daemon_args = format!(
+        "{remote_path} --daemon --grpc-port {grpc_port} --low-overhead"
+    );
     let start_cmd = match root_mode {
         RootMode::Adb | RootMode::None => {
             // adbd is root (Adb) or no root available (None) — run directly

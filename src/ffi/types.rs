@@ -108,6 +108,12 @@ pub struct ProfilerRtbOptions {
     pub enable_fps_present_fence: bool,
     pub enable_gpu: bool,
     pub use_dumpsys_fps: bool,
+    pub enable_power: bool,
+    pub enable_temperature: bool,
+    pub enable_dvfs: bool,
+    pub enable_memory: bool,
+    pub enable_total_mips: bool,
+    pub enable_thread_mips: bool,
 }
 
 /// Status of a Perfetto trace session.
