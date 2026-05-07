@@ -172,9 +172,9 @@ async fn start_daemon(
 /// Deploy the realtime_profile binary to the device and start it as a
 /// background gRPC daemon.
 ///
-/// Uses an optimistic strategy: first tries to start the daemon without
-/// pushing (assuming a previous binary is still on-device). Only if that
-/// fails does it push the binary and retry.
+/// When a local binary is provided, always push it before starting so UI builds
+/// and instrumentation changes are reflected on-device. If no local binary is
+/// provided, fall back to starting the existing remote daemon.
 ///
 /// * `local_path` – local binary to push (empty string to skip push)
 /// * `remote_path` – absolute path on device (e.g. `/data/local/tmp/realtime_profile`)
@@ -186,29 +186,26 @@ pub async fn deploy_and_start(
     grpc_port: u16,
     low_overhead: bool,
 ) -> Result<()> {
-    // Phase 1: Optimistic start — try without pushing
-    log::info!("[{serial}] 嘗試直接啟動 daemon（不 push）");
-    if start_daemon(serial, remote_path, grpc_port, low_overhead)
-        .await
-        .is_ok()
-        && is_running(serial).await
-    {
-        log::info!("[{serial}] daemon 直接啟動成功，跳過 push");
+    if !local_path.is_empty() {
+        log::info!("[{serial}] 推送最新 daemon binary 後啟動");
+        kill_daemon(serial).await;
+        push_binaries(serial, local_path, remote_path).await?;
+        start_daemon(serial, remote_path, grpc_port, low_overhead).await?;
+
+        if !is_running(serial).await {
+            anyhow::bail!("部署後 daemon 仍無法啟動");
+        }
+        log::info!("[{serial}] daemon 已使用最新 binary 啟動");
         return Ok(());
     }
-    log::info!("[{serial}] 直接啟動失敗，執行完整部署");
 
-    // Phase 2: Full deploy — push binary then start
-    if local_path.is_empty() {
-        anyhow::bail!("Daemon 啟動失敗且未提供 local binary 路徑");
-    }
-    push_binaries(serial, local_path, remote_path).await?;
+    log::info!("[{serial}] 未提供 local binary，嘗試啟動既有 remote daemon");
     start_daemon(serial, remote_path, grpc_port, low_overhead).await?;
 
     if !is_running(serial).await {
-        anyhow::bail!("完整部署後 daemon 仍無法啟動");
+        anyhow::bail!("Daemon 啟動失敗且未提供 local binary 路徑");
     }
-    log::info!("[{serial}] 完整部署後 daemon 啟動成功");
+    log::info!("[{serial}] 既有 remote daemon 啟動成功");
     Ok(())
 }
 
