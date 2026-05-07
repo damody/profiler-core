@@ -53,12 +53,7 @@ impl<'a> DaqTask<'a> {
         self.lib.check(code)
     }
 
-    pub fn cfg_timing(
-        &self,
-        rate: f64,
-        sample_mode: i32,
-        samps_per_chan: u64,
-    ) -> DaqmxResult<()> {
+    pub fn cfg_timing(&self, rate: f64, sample_mode: i32, samps_per_chan: u64) -> DaqmxResult<()> {
         let source = CString::new("").unwrap();
         let code = unsafe {
             (self.lib.cfg_samp_clk_timing)(
@@ -99,11 +94,7 @@ impl<'a> DaqTask<'a> {
     }
 
     #[allow(dead_code)]
-    pub fn configure_logging(
-        &self,
-        file_path: &str,
-        logging_mode: i32,
-    ) -> DaqmxResult<()> {
+    pub fn configure_logging(&self, file_path: &str, logging_mode: i32) -> DaqmxResult<()> {
         let path_c = CString::new(file_path).unwrap();
         let group = CString::new("").unwrap();
         let code = unsafe {

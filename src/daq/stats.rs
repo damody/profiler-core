@@ -26,13 +26,22 @@ pub fn compute_stats(samples: &[f64]) -> Stats {
     for &v in samples {
         sum += v;
         sum_sq += v * v;
-        if v < min { min = v; }
-        if v > max { max = v; }
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
     }
     let mean = sum / len;
     let mean = if mean < 0.0 { 0.0 } else { mean };
     let rms = (sum_sq / len).sqrt();
-    Stats { mean, min, max, rms }
+    Stats {
+        mean,
+        min,
+        max,
+        rms,
+    }
 }
 
 /// Incremental statistics accumulator (Welford-style sums).
@@ -59,8 +68,12 @@ impl RunningStats {
         self.count += 1;
         self.sum += v;
         self.sum_sq += v * v;
-        if v < self.min { self.min = v; }
-        if v > self.max { self.max = v; }
+        if v < self.min {
+            self.min = v;
+        }
+        if v > self.max {
+            self.max = v;
+        }
     }
 
     pub fn update_slice(&mut self, data: &[f64]) {
@@ -71,13 +84,23 @@ impl RunningStats {
 
     pub fn finalize(&self) -> Stats {
         if self.count == 0 {
-            return Stats { mean: 0.0, min: 0.0, max: 0.0, rms: 0.0 };
+            return Stats {
+                mean: 0.0,
+                min: 0.0,
+                max: 0.0,
+                rms: 0.0,
+            };
         }
         let n = self.count as f64;
         let mean = self.sum / n;
         let mean = if mean < 0.0 { 0.0 } else { mean };
         let rms = (self.sum_sq / n).sqrt();
-        Stats { mean, min: self.min, max: self.max, rms }
+        Stats {
+            mean,
+            min: self.min,
+            max: self.max,
+            rms,
+        }
     }
 }
 
@@ -89,7 +112,10 @@ pub struct RunningPower {
 
 impl RunningPower {
     pub fn new() -> Self {
-        Self { sum_vi: 0.0, count: 0 }
+        Self {
+            sum_vi: 0.0,
+            count: 0,
+        }
     }
 
     pub fn update(&mut self, voltage: &[f64], current: &[f64]) {
@@ -102,7 +128,11 @@ impl RunningPower {
 
     /// Average power in the same units as input (watts if V*A).
     pub fn finalize(&self) -> f64 {
-        if self.count == 0 { 0.0 } else { self.sum_vi / self.count as f64 }
+        if self.count == 0 {
+            0.0
+        } else {
+            self.sum_vi / self.count as f64
+        }
     }
 }
 

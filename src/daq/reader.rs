@@ -23,10 +23,7 @@ impl AccumulationBuffer {
 
     /// Take all accumulated samples, leaving empty vecs behind
     pub fn take(&mut self) -> Vec<Vec<f64>> {
-        self.data
-            .iter_mut()
-            .map(|ch| std::mem::take(ch))
-            .collect()
+        self.data.iter_mut().map(|ch| std::mem::take(ch)).collect()
     }
 }
 
@@ -99,7 +96,11 @@ unsafe extern "C" fn every_n_callback(
     } else {
         let count = ctx.error_count.fetch_add(1, Ordering::Relaxed);
         if count == 0 || count % 100 == 0 {
-            log::error!("DAQ callback: read_analog_f64 failed with code {} (error count={})", code, count + 1);
+            log::error!(
+                "DAQ callback: read_analog_f64 failed with code {} (error count={})",
+                code,
+                count + 1
+            );
         }
     }
 

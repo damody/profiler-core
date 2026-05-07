@@ -72,16 +72,10 @@ pub struct DaqmxLib {
     // Buffer
     pub cfg_input_buffer: unsafe extern "C" fn(TaskHandle, c_uint) -> c_int,
     // Trigger
-    pub cfg_dig_edge_start_trig:
-        unsafe extern "C" fn(TaskHandle, *const c_char, c_int) -> c_int,
+    pub cfg_dig_edge_start_trig: unsafe extern "C" fn(TaskHandle, *const c_char, c_int) -> c_int,
     // Logging
-    pub configure_logging: unsafe extern "C" fn(
-        TaskHandle,
-        *const c_char,
-        c_int,
-        *const c_char,
-        c_int,
-    ) -> c_int,
+    pub configure_logging:
+        unsafe extern "C" fn(TaskHandle, *const c_char, c_int, *const c_char, c_int) -> c_int,
     // Device control
     pub self_cal: unsafe extern "C" fn(*const c_char) -> c_int,
     pub reset_device: unsafe extern "C" fn(*const c_char) -> c_int,
@@ -99,9 +93,7 @@ impl DaqmxLib {
     /// The library is loaded once and never unloaded, because NI-DAQmx
     /// does not support being unloaded and reloaded within the same process.
     pub fn get_or_load() -> DaqmxResult<&'static Self> {
-        let result = DAQMX_LIB.get_or_init(|| {
-            Self::load_inner().map_err(|e| e.to_string())
-        });
+        let result = DAQMX_LIB.get_or_init(|| Self::load_inner().map_err(|e| e.to_string()));
         match result {
             Ok(lib) => Ok(lib),
             Err(e) => Err(DaqmxError::LibraryNotFound(e.clone())),
@@ -134,27 +126,61 @@ impl DaqmxLib {
             type FnTaskOnly = unsafe extern "C" fn(TaskHandle) -> c_int;
             type FnIsTaskDone = unsafe extern "C" fn(TaskHandle, *mut c_uint) -> c_int;
             type FnCreateAIVoltageChan = unsafe extern "C" fn(
-                TaskHandle, *const c_char, *const c_char, c_int, c_double, c_double, c_int, *const c_char,
+                TaskHandle,
+                *const c_char,
+                *const c_char,
+                c_int,
+                c_double,
+                c_double,
+                c_int,
+                *const c_char,
             ) -> c_int;
             type FnCfgSampClkTiming = unsafe extern "C" fn(
-                TaskHandle, *const c_char, c_double, c_int, c_int, u64,
+                TaskHandle,
+                *const c_char,
+                c_double,
+                c_int,
+                c_int,
+                u64,
             ) -> c_int;
             type FnReadAnalogF64 = unsafe extern "C" fn(
-                TaskHandle, c_int, c_double, c_int, *mut c_double, c_uint, *mut c_int, *mut c_uint,
+                TaskHandle,
+                c_int,
+                c_double,
+                c_int,
+                *mut c_double,
+                c_uint,
+                *mut c_int,
+                *mut c_uint,
             ) -> c_int;
             type FnRegisterEveryN = unsafe extern "C" fn(
-                TaskHandle, c_int, c_uint, c_uint, EveryNSamplesCallback, *mut std::ffi::c_void,
+                TaskHandle,
+                c_int,
+                c_uint,
+                c_uint,
+                EveryNSamplesCallback,
+                *mut std::ffi::c_void,
             ) -> c_int;
             type FnGetSysDevNames = unsafe extern "C" fn(*mut c_char, c_uint) -> c_int;
-            type FnGetDevStringProp = unsafe extern "C" fn(*const c_char, *mut c_char, c_uint) -> c_int;
+            type FnGetDevStringProp =
+                unsafe extern "C" fn(*const c_char, *mut c_char, c_uint) -> c_int;
             type FnGetDevSerialNum = unsafe extern "C" fn(*const c_char, *mut c_uint) -> c_int;
             type FnCreateLinScale = unsafe extern "C" fn(
-                *const c_char, c_double, c_double, c_int, *const c_char,
+                *const c_char,
+                c_double,
+                c_double,
+                c_int,
+                *const c_char,
             ) -> c_int;
             type FnCfgInputBuffer = unsafe extern "C" fn(TaskHandle, c_uint) -> c_int;
-            type FnCfgDigEdgeStartTrig = unsafe extern "C" fn(TaskHandle, *const c_char, c_int) -> c_int;
+            type FnCfgDigEdgeStartTrig =
+                unsafe extern "C" fn(TaskHandle, *const c_char, c_int) -> c_int;
             type FnConfigureLogging = unsafe extern "C" fn(
-                TaskHandle, *const c_char, c_int, *const c_char, c_int,
+                TaskHandle,
+                *const c_char,
+                c_int,
+                *const c_char,
+                c_int,
             ) -> c_int;
             type FnDeviceString = unsafe extern "C" fn(*const c_char) -> c_int;
             type FnGetExtendedErrorInfo = unsafe extern "C" fn(*mut c_char, c_uint) -> c_int;
@@ -165,21 +191,45 @@ impl DaqmxLib {
                 stop_task: load_fn!(lib, b"DAQmxStopTask\0", FnTaskOnly),
                 clear_task: load_fn!(lib, b"DAQmxClearTask\0", FnTaskOnly),
                 is_task_done: load_fn!(lib, b"DAQmxIsTaskDone\0", FnIsTaskDone),
-                create_ai_voltage_chan: load_fn!(lib, b"DAQmxCreateAIVoltageChan\0", FnCreateAIVoltageChan),
+                create_ai_voltage_chan: load_fn!(
+                    lib,
+                    b"DAQmxCreateAIVoltageChan\0",
+                    FnCreateAIVoltageChan
+                ),
                 cfg_samp_clk_timing: load_fn!(lib, b"DAQmxCfgSampClkTiming\0", FnCfgSampClkTiming),
                 read_analog_f64: load_fn!(lib, b"DAQmxReadAnalogF64\0", FnReadAnalogF64),
-                register_every_n_samples_event: load_fn!(lib, b"DAQmxRegisterEveryNSamplesEvent\0", FnRegisterEveryN),
+                register_every_n_samples_event: load_fn!(
+                    lib,
+                    b"DAQmxRegisterEveryNSamplesEvent\0",
+                    FnRegisterEveryN
+                ),
                 get_sys_dev_names: load_fn!(lib, b"DAQmxGetSysDevNames\0", FnGetSysDevNames),
-                get_dev_ai_physical_chans: load_fn!(lib, b"DAQmxGetDevAIPhysicalChans\0", FnGetDevStringProp),
-                get_dev_product_type: load_fn!(lib, b"DAQmxGetDevProductType\0", FnGetDevStringProp),
+                get_dev_ai_physical_chans: load_fn!(
+                    lib,
+                    b"DAQmxGetDevAIPhysicalChans\0",
+                    FnGetDevStringProp
+                ),
+                get_dev_product_type: load_fn!(
+                    lib,
+                    b"DAQmxGetDevProductType\0",
+                    FnGetDevStringProp
+                ),
                 get_dev_serial_num: load_fn!(lib, b"DAQmxGetDevSerialNum\0", FnGetDevSerialNum),
                 create_lin_scale: load_fn!(lib, b"DAQmxCreateLinScale\0", FnCreateLinScale),
                 cfg_input_buffer: load_fn!(lib, b"DAQmxCfgInputBuffer\0", FnCfgInputBuffer),
-                cfg_dig_edge_start_trig: load_fn!(lib, b"DAQmxCfgDigEdgeStartTrig\0", FnCfgDigEdgeStartTrig),
+                cfg_dig_edge_start_trig: load_fn!(
+                    lib,
+                    b"DAQmxCfgDigEdgeStartTrig\0",
+                    FnCfgDigEdgeStartTrig
+                ),
                 configure_logging: load_fn!(lib, b"DAQmxConfigureLogging\0", FnConfigureLogging),
                 self_cal: load_fn!(lib, b"DAQmxSelfCal\0", FnDeviceString),
                 reset_device: load_fn!(lib, b"DAQmxResetDevice\0", FnDeviceString),
-                get_extended_error_info: load_fn!(lib, b"DAQmxGetExtendedErrorInfo\0", FnGetExtendedErrorInfo),
+                get_extended_error_info: load_fn!(
+                    lib,
+                    b"DAQmxGetExtendedErrorInfo\0",
+                    FnGetExtendedErrorInfo
+                ),
                 _lib: lib,
             };
             Ok(daqmx)

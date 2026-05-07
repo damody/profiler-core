@@ -65,8 +65,7 @@ fn parse_numeric_cell(value: &str) -> Option<f64> {
         return Some(v);
     }
     if let Some((num_str, den_str)) = expr.split_once('/') {
-        if let (Ok(num), Ok(den)) = (num_str.trim().parse::<f64>(), den_str.trim().parse::<f64>())
-        {
+        if let (Ok(num), Ok(den)) = (num_str.trim().parse::<f64>(), den_str.trim().parse::<f64>()) {
             if den != 0.0 {
                 return Some(num / den);
             }
@@ -80,11 +79,7 @@ fn parse_numeric_cell(value: &str) -> Option<f64> {
     None
 }
 
-fn extract_cell_color(
-    worksheet: &umya_spreadsheet::Worksheet,
-    row: u32,
-    col: u32,
-) -> Rgb {
+fn extract_cell_color(worksheet: &umya_spreadsheet::Worksheet, row: u32, col: u32) -> Rgb {
     let cell = match worksheet.get_cell((col, row)) {
         Some(c) => c,
         None => return Rgb::new(0xFF, 0xFF, 0xFF),
@@ -157,7 +152,10 @@ fn sanitize_name(name: &str) -> String {
     let sanitized = name.replace(',', ";").replace('/', "_").replace('\\', "_");
     for ch in sanitized.chars() {
         if WRONG_SYMBOLS.contains(&ch) {
-            warn!("Channel name '{}' contains symbol '{}' (may cause issues)", name, ch);
+            warn!(
+                "Channel name '{}' contains symbol '{}' (may cause issues)",
+                name, ch
+            );
             break;
         }
     }
@@ -218,9 +216,9 @@ pub fn load_config(path: &Path) -> Result<DaqConfig> {
             if index_str.is_empty() && current_ch.is_empty() {
                 continue;
             }
-            let index: u32 = index_str
-                .parse()
-                .with_context(|| format!("Invalid power pair index '{}' at row {}", index_str, row))?;
+            let index: u32 = index_str.parse().with_context(|| {
+                format!("Invalid power pair index '{}' at row {}", index_str, row)
+            })?;
             power_pairs.push(PowerPair {
                 index,
                 current_channel: current_ch,
@@ -257,7 +255,10 @@ pub fn load_config(path: &Path) -> Result<DaqConfig> {
         // Skip placeholder channel names (N/A, NA, None)
         let name_lower = raw_name.to_lowercase();
         if name_lower == "n/a" || name_lower == "na" || name_lower == "none" {
-            debug!("DAQ: Skipping placeholder channel '{}' at row {}", raw_name, row);
+            debug!(
+                "DAQ: Skipping placeholder channel '{}' at row {}",
+                raw_name, row
+            );
             continue;
         }
         let gain_str = cell_value(ch_sheet, row, 3);
@@ -276,9 +277,10 @@ pub fn load_config(path: &Path) -> Result<DaqConfig> {
             if v.is_empty() {
                 None
             } else {
-                Some(v.parse::<u32>().with_context(|| {
-                    format!("Invalid order '{}' at row {}", v, row)
-                })?)
+                Some(
+                    v.parse::<u32>()
+                        .with_context(|| format!("Invalid order '{}' at row {}", v, row))?,
+                )
             }
         } else {
             None
@@ -311,13 +313,24 @@ pub fn load_config(path: &Path) -> Result<DaqConfig> {
         });
     }
 
-    info!("DAQ: Config loaded — {} channels, {} power pairs (has_order={}, has_range={})",
-        channels.len(), power_pairs.len(), has_order, has_range);
+    info!(
+        "DAQ: Config loaded — {} channels, {} power pairs (has_order={}, has_range={})",
+        channels.len(),
+        power_pairs.len(),
+        has_order,
+        has_range
+    );
     for ch in &channels {
-        debug!("DAQ:   Channel '{}' on {} (gain={}, offset={})", ch.name, ch.physical_channel, ch.gain, ch.offset);
+        debug!(
+            "DAQ:   Channel '{}' on {} (gain={}, offset={})",
+            ch.name, ch.physical_channel, ch.gain, ch.offset
+        );
     }
     for pp in &power_pairs {
-        debug!("DAQ:   PowerPair #{}: I={}, V={}", pp.index, pp.current_channel, pp.voltage_channel);
+        debug!(
+            "DAQ:   PowerPair #{}: I={}, V={}",
+            pp.index, pp.current_channel, pp.voltage_channel
+        );
     }
 
     Ok(DaqConfig {

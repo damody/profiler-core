@@ -10,7 +10,9 @@ pub mod stats;
 pub mod streaming;
 pub mod task;
 
-pub use config::{DaqConfig, load_config};
+pub use config::{load_config, DaqConfig};
 pub use device::DeviceInfo;
 pub use ffi_daqmx::DaqmxLib;
-pub use streaming::{DaqStreamHandle, DaqPollData, DaqSummary, DaqChannelSummary, DaqPowerPairSummary};
+pub use streaming::{
+    DaqChannelSummary, DaqPollData, DaqPowerPairSummary, DaqStreamHandle, DaqSummary,
+};

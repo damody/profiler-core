@@ -31,7 +31,13 @@ fn query_string(
 ) -> DaqmxResult<String> {
     let dev_cstr = CString::new(device_name).unwrap();
     let mut buf = vec![0u8; 4096];
-    let code = unsafe { func(dev_cstr.as_ptr(), buf.as_mut_ptr() as *mut _, buf.len() as u32) };
+    let code = unsafe {
+        func(
+            dev_cstr.as_ptr(),
+            buf.as_mut_ptr() as *mut _,
+            buf.len() as u32,
+        )
+    };
     lib.check(code)?;
     let nul_pos = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     Ok(String::from_utf8_lossy(&buf[..nul_pos]).to_string())
@@ -64,8 +70,13 @@ pub fn enumerate_devices(lib: &DaqmxLib) -> DaqmxResult<Vec<DeviceInfo>> {
         let channels_str = query_string(lib.get_dev_ai_physical_chans, lib, name)?;
         let ai_channels = parse_daqmx_list(&channels_str);
 
-        info!("DAQ: Device '{}': {} (S/N: 0x{:08X}, {} AI channels)",
-            name, product_type, serial, ai_channels.len());
+        info!(
+            "DAQ: Device '{}': {} (S/N: 0x{:08X}, {} AI channels)",
+            name,
+            product_type,
+            serial,
+            ai_channels.len()
+        );
 
         devices.push(DeviceInfo {
             name: name.clone(),

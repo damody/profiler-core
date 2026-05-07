@@ -5,15 +5,15 @@ use std::time::Instant;
 use crossbeam_queue::ArrayQueue;
 use log::{debug, error, info, warn};
 
-use super::config::{DaqConfig, Rgb, build_save_name, power_pair_for_channel};
+use super::avro_writer::DaqAvroWriter;
+use super::config::{build_save_name, power_pair_for_channel, DaqConfig, Rgb};
 use super::constants;
 use super::device::DeviceInfo;
 use super::ffi_daqmx::DaqmxLib;
-use super::reader::{AccumulationBuffer, register_callback};
+use super::reader::{register_callback, AccumulationBuffer};
 use super::scale;
-use super::avro_writer::DaqAvroWriter;
 use super::stats;
-use super::stats::{RunningStats, RunningPower};
+use super::stats::{RunningPower, RunningStats};
 use super::task::DaqTask;
 
 /// A single poll result pushed to the queue
@@ -135,22 +135,31 @@ impl DaqStreamHandle {
             for ch in &dev_channels {
                 let pp = power_pair_for_channel(config, ch);
                 let save_name = build_save_name(&ch.physical_channel, &ch.name, &ch.color, pp);
-                scale::create_linear_scale(lib_ref, &save_name, ch.gain, ch.offset)
-                    .map_err(|e| {
-                        error!("DAQ: Failed to create scale for channel '{}': {}", ch.name, e);
+                scale::create_linear_scale(lib_ref, &save_name, ch.gain, ch.offset).map_err(
+                    |e| {
+                        error!(
+                            "DAQ: Failed to create scale for channel '{}': {}",
+                            ch.name, e
+                        );
                         format!("Failed to create scale for {}: {}", ch.name, e)
-                    })?;
+                    },
+                )?;
                 scale_names.push(save_name);
             }
 
             // Create task
             let task_name = format!("mprofiler_{}", dev.name);
-            debug!("DAQ: Creating task '{}' for device '{}'", task_name, dev.name);
-            let task = DaqTask::new(lib_ref, &task_name)
-                .map_err(|e| {
-                    error!("DAQ: Failed to create task for device '{}': {}", dev.name, e);
-                    format!("Failed to create task for {}: {}", dev.name, e)
-                })?;
+            debug!(
+                "DAQ: Creating task '{}' for device '{}'",
+                task_name, dev.name
+            );
+            let task = DaqTask::new(lib_ref, &task_name).map_err(|e| {
+                error!(
+                    "DAQ: Failed to create task for device '{}': {}",
+                    dev.name, e
+                );
+                format!("Failed to create task for {}: {}", dev.name, e)
+            })?;
 
             // Add channels
             let mut num_valid = 0;
@@ -180,7 +189,10 @@ impl DaqStreamHandle {
                     &scale_names[idx],
                 )
                 .map_err(|e| {
-                    error!("DAQ: Failed to add channel '{}': {}", ch.physical_channel, e);
+                    error!(
+                        "DAQ: Failed to add channel '{}': {}",
+                        ch.physical_channel, e
+                    );
                     format!("Failed to add channel {}: {}", ch.physical_channel, e)
                 })?;
 
@@ -204,14 +216,20 @@ impl DaqStreamHandle {
                 sample_rate as u64, // buffer size = 1 second
             )
             .map_err(|e| {
-                error!("DAQ: Failed to configure timing for device '{}': {}", dev.name, e);
+                error!(
+                    "DAQ: Failed to configure timing for device '{}': {}",
+                    dev.name, e
+                );
                 format!("Failed to configure timing: {}", e)
             })?;
 
             // Configure input buffer: 2 seconds to avoid overflow at high sample rates
             let buf_size = sample_rate * 2;
             task.cfg_input_buffer(buf_size).map_err(|e| {
-                error!("DAQ: Failed to configure input buffer for device '{}': {}", dev.name, e);
+                error!(
+                    "DAQ: Failed to configure input buffer for device '{}': {}",
+                    dev.name, e
+                );
                 format!("Failed to configure input buffer: {}", e)
             })?;
 
@@ -220,18 +238,22 @@ impl DaqStreamHandle {
             let buffer = Arc::new(Mutex::new(AccumulationBuffer::new(num_valid)));
             all_buffers.push(buffer.clone());
 
-            let ctx = register_callback(&task, num_valid, interval, buffer)
-                .map_err(|e| {
-                    error!("DAQ: Failed to register callback for device '{}': {}", dev.name, e);
-                    format!("Failed to register callback: {}", e)
-                })?;
+            let ctx = register_callback(&task, num_valid, interval, buffer).map_err(|e| {
+                error!(
+                    "DAQ: Failed to register callback for device '{}': {}",
+                    dev.name, e
+                );
+                format!("Failed to register callback: {}", e)
+            })?;
 
-            task.start()
-                .map_err(|e| {
-                    error!("DAQ: Failed to start task for device '{}': {}", dev.name, e);
-                    format!("Failed to start task: {}", e)
-                })?;
-            info!("DAQ: Task '{}' started with {} channels, interval={} samples", task_name, num_valid, interval);
+            task.start().map_err(|e| {
+                error!("DAQ: Failed to start task for device '{}': {}", dev.name, e);
+                format!("Failed to start task: {}", e)
+            })?;
+            info!(
+                "DAQ: Task '{}' started with {} channels, interval={} samples",
+                task_name, num_valid, interval
+            );
 
             let handle = task.handle;
             task_handles.push(handle);
@@ -255,7 +277,10 @@ impl DaqStreamHandle {
         let channel_metas_clone = all_channel_metas.clone();
         let rate = sample_rate as f64;
 
-        info!("DAQ: Starting background streaming thread with {} channels", all_channel_metas.len());
+        info!(
+            "DAQ: Starting background streaming thread with {} channels",
+            all_channel_metas.len()
+        );
 
         // Background thread: periodically drain buffers, compute power, push to queue
         let thread_handle = std::thread::spawn(move || {
@@ -266,38 +291,43 @@ impl DaqStreamHandle {
             let dt = 1.0 / rate;
 
             // Incremental statistics (replaces cumulative_samples)
-            let mut running_stats: Vec<RunningStats> = (0..total_channels).map(|_| RunningStats::new()).collect();
+            let mut running_stats: Vec<RunningStats> =
+                (0..total_channels).map(|_| RunningStats::new()).collect();
 
             // Build sorted power-pair index list + RunningPower accumulators
-            let mut pair_indices_set: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+            let mut pair_indices_set: std::collections::BTreeSet<u32> =
+                std::collections::BTreeSet::new();
             for meta in &channel_metas_clone {
                 if let Some((idx, _)) = meta.power_pair {
                     pair_indices_set.insert(idx);
                 }
             }
             let pair_indices: Vec<u32> = pair_indices_set.into_iter().collect();
-            let mut running_powers: Vec<(u32, String, RunningPower)> = pair_indices.iter().map(|&idx| {
-                // Determine pair name (voltage channel name)
-                let mut name = String::new();
-                for meta in &channel_metas_clone {
-                    if let Some((pidx, is_current)) = meta.power_pair {
-                        if pidx == idx && !is_current {
-                            name = meta.name.clone();
-                        }
-                    }
-                }
-                if name.is_empty() {
-                    // Fallback to current channel name
+            let mut running_powers: Vec<(u32, String, RunningPower)> = pair_indices
+                .iter()
+                .map(|&idx| {
+                    // Determine pair name (voltage channel name)
+                    let mut name = String::new();
                     for meta in &channel_metas_clone {
                         if let Some((pidx, is_current)) = meta.power_pair {
-                            if pidx == idx && is_current {
+                            if pidx == idx && !is_current {
                                 name = meta.name.clone();
                             }
                         }
                     }
-                }
-                (idx, name, RunningPower::new())
-            }).collect();
+                    if name.is_empty() {
+                        // Fallback to current channel name
+                        for meta in &channel_metas_clone {
+                            if let Some((pidx, is_current)) = meta.power_pair {
+                                if pidx == idx && is_current {
+                                    name = meta.name.clone();
+                                }
+                            }
+                        }
+                    }
+                    (idx, name, RunningPower::new())
+                })
+                .collect();
 
             // File writer (CSV or Avro, opened if output_path is Some)
             enum DaqFileWriter {
@@ -308,7 +338,8 @@ impl DaqStreamHandle {
             let mut file_sample_index: u64 = 0;
             if let Some(ref path) = output_path {
                 if path.ends_with(".avro") {
-                    let names: Vec<String> = channel_metas_clone.iter().map(|m| m.name.clone()).collect();
+                    let names: Vec<String> =
+                        channel_metas_clone.iter().map(|m| m.name.clone()).collect();
                     match DaqAvroWriter::new(path, &names) {
                         Ok(w) => {
                             file_writer = Some(DaqFileWriter::Avro(w));
@@ -350,7 +381,8 @@ impl DaqStreamHandle {
 
                 // Drain all accumulated data from all buffers
                 let mut channel_offset = 0;
-                let mut chunk_data: Vec<Vec<f64>> = (0..total_channels).map(|_| Vec::new()).collect();
+                let mut chunk_data: Vec<Vec<f64>> =
+                    (0..total_channels).map(|_| Vec::new()).collect();
 
                 for (buf_idx, buf) in all_buffers.iter().enumerate() {
                     match buf.lock() {
@@ -364,7 +396,8 @@ impl DaqStreamHandle {
                             channel_offset += locked.data.len();
                         }
                         Err(e) => {
-                            let msg = format!("Buffer mutex poisoned for buffer {}: {}", buf_idx, e);
+                            let msg =
+                                format!("Buffer mutex poisoned for buffer {}: {}", buf_idx, e);
                             error!("DAQ: {}", msg);
                             let _ = error_queue_clone.push(msg);
                         }
@@ -377,7 +410,8 @@ impl DaqStreamHandle {
                     continue;
                 }
 
-                let chunk_sample_count: usize = chunk_data.iter().map(|ch| ch.len()).max().unwrap_or(0);
+                let chunk_sample_count: usize =
+                    chunk_data.iter().map(|ch| ch.len()).max().unwrap_or(0);
                 total_samples_collected += chunk_sample_count as u64;
                 poll_count += 1;
 
@@ -393,8 +427,11 @@ impl DaqStreamHandle {
                     for (i, meta) in channel_metas_clone.iter().enumerate() {
                         if let Some((pidx, is_current)) = meta.power_pair {
                             if pidx == *pair_idx {
-                                if is_current { current_data = Some(&chunk_data[i]); }
-                                else { voltage_data = Some(&chunk_data[i]); }
+                                if is_current {
+                                    current_data = Some(&chunk_data[i]);
+                                } else {
+                                    voltage_data = Some(&chunk_data[i]);
+                                }
                             }
                         }
                     }
@@ -452,8 +489,11 @@ impl DaqStreamHandle {
                     for (i, meta) in channel_metas_clone.iter().enumerate() {
                         if let Some((pidx, is_current)) = meta.power_pair {
                             if pidx == *pair_idx {
-                                if is_current { current_data = Some(&chunk_data[i]); }
-                                else { voltage_data = Some(&chunk_data[i]); }
+                                if is_current {
+                                    current_data = Some(&chunk_data[i]);
+                                } else {
+                                    voltage_data = Some(&chunk_data[i]);
+                                }
                             }
                         }
                     }
@@ -477,8 +517,12 @@ impl DaqStreamHandle {
                 }
 
                 if poll_count % 20 == 0 {
-                    debug!("DAQ: Poll #{}, total samples collected: {}, elapsed: {:.1}s",
-                        poll_count, total_samples_collected, start_time.elapsed().as_secs_f64());
+                    debug!(
+                        "DAQ: Poll #{}, total samples collected: {}, elapsed: {:.1}s",
+                        poll_count,
+                        total_samples_collected,
+                        start_time.elapsed().as_secs_f64()
+                    );
                 }
             }
 
@@ -498,8 +542,12 @@ impl DaqStreamHandle {
                 info!("DAQ: Output completed: {}", path);
             }
 
-            info!("DAQ: Streaming stopped after {:.1}s, {} polls, {} total samples",
-                start_time.elapsed().as_secs_f64(), poll_count, total_samples_collected);
+            info!(
+                "DAQ: Streaming stopped after {:.1}s, {} polls, {} total samples",
+                start_time.elapsed().as_secs_f64(),
+                poll_count,
+                total_samples_collected
+            );
 
             // Clean up: stop and clear all tasks
             for (i, &handle) in task_handles.iter().enumerate() {
@@ -625,8 +673,13 @@ impl DaqStreamHandle {
             });
         }
 
-        info!("DAQ: Summary computed — {} channels, {} power pairs, total {:.1} mW, {:.1}s",
-            channel_summaries.len(), power_breakdown.len(), total_power_mw, measurement_time_s);
+        info!(
+            "DAQ: Summary computed — {} channels, {} power pairs, total {:.1} mW, {:.1}s",
+            channel_summaries.len(),
+            power_breakdown.len(),
+            total_power_mw,
+            measurement_time_s
+        );
 
         Ok(DaqSummary {
             channels: channel_summaries,
@@ -642,7 +695,10 @@ impl DaqStreamHandle {
     }
 }
 
-fn channels_for_device<'a>(config: &'a DaqConfig, device: &DeviceInfo) -> Vec<&'a super::config::ChannelConfig> {
+fn channels_for_device<'a>(
+    config: &'a DaqConfig,
+    device: &DeviceInfo,
+) -> Vec<&'a super::config::ChannelConfig> {
     config
         .channels
         .iter()
