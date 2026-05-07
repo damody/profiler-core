@@ -1,6 +1,6 @@
-pub mod devices;
 pub mod commands;
 pub mod daemon;
+pub mod devices;
 
 use tokio::process::Command;
 

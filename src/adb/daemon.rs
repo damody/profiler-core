@@ -88,7 +88,12 @@ async fn push_binaries(serial: &str, local_path: &str, remote_path: &str) -> Res
 
 /// Assume the binary is already on-device; chmod, kill old instance, get root,
 /// and start the daemon.
-async fn start_daemon(serial: &str, remote_path: &str, grpc_port: u16) -> Result<()> {
+async fn start_daemon(
+    serial: &str,
+    remote_path: &str,
+    grpc_port: u16,
+    low_overhead: bool,
+) -> Result<()> {
     // Make it executable
     commands::shell(serial, &format!("chmod +x {remote_path}"))
         .await
@@ -123,11 +128,13 @@ async fn start_daemon(serial: &str, remote_path: &str, grpc_port: u16) -> Result
         .map(|(d, _)| d)
         .unwrap_or("/data/local/tmp");
     let ld_env = format!("LD_LIBRARY_PATH={remote_dir}");
-    // 預設啟用 --low-overhead：pin LCPU、nice=10、嘗試 SCHED_IDLE、強制不用 dumpsys、quiet。
-    // 桌面端錄 GameReport / Mperf 為主要使用情境，daemon 不應擠壓遊戲關鍵線程。
-    let daemon_args = format!(
-        "{remote_path} --daemon --grpc-port {grpc_port} --low-overhead"
-    );
+    // 低負載模式預設開啟；關閉時明確使用 legacy mode 方便回滾驗證。
+    let overhead_flag = if low_overhead {
+        "--low-overhead --sync-only"
+    } else {
+        "--legacy-mode"
+    };
+    let daemon_args = format!("{remote_path} --daemon --grpc-port {grpc_port} {overhead_flag}");
     let start_cmd = match root_mode {
         RootMode::Adb | RootMode::None => {
             // adbd is root (Adb) or no root available (None) — run directly
@@ -135,9 +142,7 @@ async fn start_daemon(serial: &str, remote_path: &str, grpc_port: u16) -> Result
         }
         RootMode::Su => {
             // su available — wrap the entire command in su -c
-            format!(
-                "su -c \"{ld_env} nohup {daemon_args} > /dev/null 2>&1 &\""
-            )
+            format!("su -c \"{ld_env} nohup {daemon_args} > /dev/null 2>&1 &\"")
         }
     };
 
@@ -179,10 +184,15 @@ pub async fn deploy_and_start(
     local_path: &str,
     remote_path: &str,
     grpc_port: u16,
+    low_overhead: bool,
 ) -> Result<()> {
     // Phase 1: Optimistic start — try without pushing
     log::info!("[{serial}] 嘗試直接啟動 daemon（不 push）");
-    if start_daemon(serial, remote_path, grpc_port).await.is_ok() && is_running(serial).await {
+    if start_daemon(serial, remote_path, grpc_port, low_overhead)
+        .await
+        .is_ok()
+        && is_running(serial).await
+    {
         log::info!("[{serial}] daemon 直接啟動成功，跳過 push");
         return Ok(());
     }
@@ -193,7 +203,7 @@ pub async fn deploy_and_start(
         anyhow::bail!("Daemon 啟動失敗且未提供 local binary 路徑");
     }
     push_binaries(serial, local_path, remote_path).await?;
-    start_daemon(serial, remote_path, grpc_port).await?;
+    start_daemon(serial, remote_path, grpc_port, low_overhead).await?;
 
     if !is_running(serial).await {
         anyhow::bail!("完整部署後 daemon 仍無法啟動");
@@ -212,7 +222,9 @@ pub async fn is_running(serial: &str) -> bool {
 
 /// Return the daemon PID if `realtime_profile` is running.
 pub async fn get_daemon_pid(serial: &str) -> Option<i32> {
-    let pid_str = commands::shell(serial, "pidof realtime_profile").await.ok()?;
+    let pid_str = commands::shell(serial, "pidof realtime_profile")
+        .await
+        .ok()?;
     pid_str
         .trim()
         .split_whitespace()
@@ -223,7 +235,9 @@ pub async fn get_daemon_pid(serial: &str) -> Option<i32> {
 /// Return daemon uid (effective uid field in `/proc/<pid>/status`), if available.
 pub async fn get_daemon_uid(serial: &str) -> Option<u32> {
     let pid = get_daemon_pid(serial).await?;
-    let status = commands::shell(serial, &format!("cat /proc/{pid}/status")).await.ok()?;
+    let status = commands::shell(serial, &format!("cat /proc/{pid}/status"))
+        .await
+        .ok()?;
     for line in status.lines() {
         if line.starts_with("Uid:") {
             // Format: Uid:\tReal\tEffective\tSavedSet\tFilesystem
@@ -264,28 +278,65 @@ pub async fn ensure_running_rooted(
     local_path: &str,
     remote_path: &str,
     grpc_port: u16,
+    low_overhead: bool,
 ) -> Result<()> {
     if !is_running(serial).await {
         log::info!("[{serial}] daemon 未運行，啟動中...");
-        return deploy_and_start(serial, local_path, remote_path, grpc_port).await;
+        return deploy_and_start(serial, local_path, remote_path, grpc_port, low_overhead).await;
     }
 
     match get_daemon_uid(serial).await {
-        Some(0) => {
-            log::info!("[{serial}] daemon 已為 root，沿用現有進程");
-            Ok(())
-        }
+        Some(0) => match daemon_low_overhead_matches(serial, low_overhead).await {
+            Some(true) => {
+                log::info!("[{serial}] daemon 已為 root，沿用現有進程");
+                Ok(())
+            }
+            Some(false) => {
+                log::info!("[{serial}] daemon low-overhead 設定已變更，重啟套用...");
+                kill_daemon(serial).await;
+                deploy_and_start(serial, local_path, remote_path, grpc_port, low_overhead).await
+            }
+            None => {
+                log::warn!("[{serial}] 無法判斷 daemon low-overhead 設定，重啟套用...");
+                kill_daemon(serial).await;
+                deploy_and_start(serial, local_path, remote_path, grpc_port, low_overhead).await
+            }
+        },
         Some(uid) => {
             log::warn!("[{serial}] daemon uid={uid} (非 root)，重啟為 root...");
             kill_daemon(serial).await;
-            deploy_and_start(serial, local_path, remote_path, grpc_port).await
+            deploy_and_start(serial, local_path, remote_path, grpc_port, low_overhead).await
         }
         None => {
             log::warn!("[{serial}] 無法判斷 daemon uid，保守重啟為 root...");
             kill_daemon(serial).await;
-            deploy_and_start(serial, local_path, remote_path, grpc_port).await
+            deploy_and_start(serial, local_path, remote_path, grpc_port, low_overhead).await
         }
     }
+}
+
+async fn daemon_low_overhead_matches(serial: &str, expected_low_overhead: bool) -> Option<bool> {
+    let pid_str = commands::shell(serial, "pidof realtime_profile")
+        .await
+        .ok()?;
+    let pid = pid_str.trim().split_whitespace().next()?;
+    if pid.is_empty() {
+        return None;
+    }
+
+    let cmdline = commands::shell(serial, &format!("cat /proc/{pid}/cmdline | tr '\\0' ' '"))
+        .await
+        .ok()?;
+    let parts: Vec<&str> = cmdline.split_whitespace().collect();
+    let has_low_overhead = parts.iter().any(|part| *part == "--low-overhead");
+    let has_sync_only = parts.iter().any(|part| *part == "--sync-only");
+    let has_legacy_mode = parts.iter().any(|part| *part == "--legacy-mode");
+
+    Some(if expected_low_overhead {
+        has_low_overhead && has_sync_only && !has_legacy_mode
+    } else {
+        has_legacy_mode || !has_low_overhead
+    })
 }
 
 /// Query the gRPC port that the running daemon is actually listening on.
@@ -293,7 +344,9 @@ pub async fn ensure_running_rooted(
 /// Reads `/proc/<pid>/cmdline` and looks for the `--grpc-port` argument.
 /// Returns `None` if the daemon is not running or the port cannot be determined.
 pub async fn get_grpc_port(serial: &str) -> Option<u16> {
-    let pid_str = commands::shell(serial, "pidof realtime_profile").await.ok()?;
+    let pid_str = commands::shell(serial, "pidof realtime_profile")
+        .await
+        .ok()?;
     let pid = pid_str.trim().split_whitespace().next()?;
     if pid.is_empty() {
         return None;

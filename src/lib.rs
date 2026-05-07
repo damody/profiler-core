@@ -1,7 +1,7 @@
-pub mod ffi;
 pub mod adb;
-pub mod grpc;
 pub mod daq;
+pub mod ffi;
+pub mod grpc;
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -25,10 +25,12 @@ static PANIC_HOOK_INIT: Once = Once::new();
 static SEH_HOOK_INIT: Once = Once::new();
 static CRASH_LOG_RESET_INIT: Once = Once::new();
 
-use crate::grpc::client::ProfilerClient;
-use crate::grpc::streaming::{RtbStreamHandle, CrStreamHandle, TcStreamHandle, CmlStreamHandle, GcStreamHandle};
-use crate::daq::streaming::DaqStreamHandle;
 use crate::daq::config::DaqConfig;
+use crate::daq::streaming::DaqStreamHandle;
+use crate::grpc::client::ProfilerClient;
+use crate::grpc::streaming::{
+    CmlStreamHandle, CrStreamHandle, GcStreamHandle, RtbStreamHandle, TcStreamHandle,
+};
 
 /// Global tokio runtime, lazily initialized via `init_runtime()`.
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -94,14 +96,13 @@ pub struct ConnectionEntry {
     pub serial: String,
     pub client: ProfilerClient,
     pub port: u16,
+    pub daemon_low_overhead: bool,
 }
 
 /// Initialize the global tokio runtime. Returns true if it was freshly created.
 pub fn init_runtime() -> bool {
     let created = RUNTIME
-        .set(
-            Runtime::new().expect("Failed to create tokio runtime"),
-        )
+        .set(Runtime::new().expect("Failed to create tokio runtime"))
         .is_ok();
 
     // Also initialise the other global maps
@@ -201,7 +202,9 @@ pub fn shutdown_runtime() {
 
 /// Get a reference to the global runtime, panics if not initialised.
 pub fn runtime() -> &'static Runtime {
-    RUNTIME.get().expect("Runtime not initialized – call profiler_init() first")
+    RUNTIME
+        .get()
+        .expect("Runtime not initialized – call profiler_init() first")
 }
 
 /// Get the connections map.
@@ -367,7 +370,7 @@ unsafe extern "system" fn vectored_exception_handler(
         0xC0000409 | // stack buffer overrun / fast fail
         0xC000001D | // illegal instruction
         0xC00000FD | // stack overflow
-        0x80000003   // breakpoint
+        0x80000003 // breakpoint
     );
     if !should_log {
         return 0;
@@ -393,10 +396,7 @@ fn install_windows_seh_hook() {
                 "AddVectoredExceptionHandler install failed",
             );
         } else {
-            append_crash_log_internal(
-                "crash hook init",
-                "AddVectoredExceptionHandler installed",
-            );
+            append_crash_log_internal("crash hook init", "AddVectoredExceptionHandler installed");
         }
     });
 }

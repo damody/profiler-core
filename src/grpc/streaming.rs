@@ -1,24 +1,46 @@
 use crossbeam_queue::ArrayQueue;
-use std::sync::atomic::{AtomicU64, Ordering};
+use prost::Message;
+use std::io::{Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread::{self, JoinHandle as ThreadJoinHandle};
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::proto::RtbDataPoint;
-use crate::proto::CrDataPoint;
-use crate::proto::TcDataPoint;
-use crate::proto::CmlDataPoint;
-use crate::proto::GcDataPoint;
+use crate::proto::{
+    CmlDataPoint, CmlStreamRequest, CrDataPoint, CrStreamRequest, GcDataPoint, GcStreamRequest,
+    RtbDataPoint, RtbStreamRequest, TcDataPoint, TcStreamRequest,
+};
 
 /// A handle to an active RTB gRPC stream.
 ///
 /// Data points are pushed into a bounded lock-free queue by a background
 /// tokio task.  The FFI layer polls the queue non-blocking.
-pub struct RtbStreamHandle {
+pub enum RtbStreamHandle {
+    Grpc(GrpcRtbStreamHandle),
+    Sync(SyncRtbStreamHandle),
+}
+
+const SYNC_CMD_START_RTB_STREAM: u8 = 1;
+const SYNC_CMD_START_CR_STREAM: u8 = 38;
+const SYNC_CMD_START_TC_STREAM: u8 = 39;
+const SYNC_CMD_START_CML_STREAM: u8 = 40;
+const SYNC_CMD_START_GC_STREAM: u8 = 41;
+
+pub struct GrpcRtbStreamHandle {
     queue: Arc<ArrayQueue<RtbDataPoint>>,
     cancel: CancellationToken,
     _task: JoinHandle<()>,
+}
+
+pub struct SyncRtbStreamHandle {
+    queue: Arc<ArrayQueue<RtbDataPoint>>,
+    cancel: Arc<AtomicBool>,
+    shutdown_stream: TcpStream,
+    thread: ThreadJoinHandle<()>,
 }
 
 impl RtbStreamHandle {
@@ -84,31 +106,296 @@ impl RtbStreamHandle {
             }
         });
 
-        Self {
+        Self::Grpc(GrpcRtbStreamHandle {
             queue,
             cancel,
             _task: task,
-        }
+        })
+    }
+
+    pub fn start_sync(
+        addr: &str,
+        request: RtbStreamRequest,
+        capacity: usize,
+    ) -> anyhow::Result<Self> {
+        SyncRtbStreamHandle::start(addr, request, capacity).map(Self::Sync)
     }
 
     /// Non-blocking poll: returns the next data point if available.
     pub fn poll(&self) -> Option<RtbDataPoint> {
-        self.queue.pop()
+        match self {
+            Self::Grpc(handle) => handle.queue.pop(),
+            Self::Sync(handle) => handle.queue.pop(),
+        }
     }
 
     /// Cancel the background stream task.
     pub fn cancel(self) {
-        self.cancel.cancel();
-        // The JoinHandle is dropped, which is fine – the task will
-        // notice the cancellation token and exit.
+        match self {
+            Self::Grpc(handle) => {
+                handle.cancel.cancel();
+                // The JoinHandle is dropped, which is fine – the task will
+                // notice the cancellation token and exit.
+            }
+            Self::Sync(handle) => handle.cancel(),
+        }
     }
+}
+
+impl SyncRtbStreamHandle {
+    fn start(addr: &str, request: RtbStreamRequest, capacity: usize) -> anyhow::Result<Self> {
+        let socket_addr = resolve_socket_addr(addr)?;
+        let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2))?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+        let request_bytes = request.encode_to_vec();
+        stream.write_all(&[SYNC_CMD_START_RTB_STREAM])?;
+        stream.write_all(&(request_bytes.len() as u32).to_be_bytes())?;
+        stream.write_all(&request_bytes)?;
+        stream.flush()?;
+
+        let mut status = [0u8; 1];
+        stream.read_exact(&mut status)?;
+        if status[0] != 0 {
+            let message = read_sync_error_message(&mut stream)?;
+            anyhow::bail!("sync RTB start rejected: {message}");
+        }
+
+        stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+        let mut reader = stream.try_clone()?;
+        let shutdown_stream = stream.try_clone()?;
+        let queue = Arc::new(ArrayQueue::new(capacity));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let q = queue.clone();
+        let ct = cancel.clone();
+
+        let thread = thread::Builder::new()
+            .name("rtb-sync-client".to_string())
+            .spawn(move || {
+                while !ct.load(Ordering::Acquire) {
+                    match read_sync_rtb_point(&mut reader) {
+                        Ok(Some(dp)) => match q.push(dp) {
+                            Ok(()) => {}
+                            Err(rejected) => {
+                                let _ = q.pop();
+                                let _ = q.push(rejected);
+                                log::trace!("sync RTB queue full, dropped oldest sample");
+                            }
+                        },
+                        Ok(None) => break,
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut => {}
+                        Err(e) => {
+                            log::warn!("sync RTB read failed: {e}");
+                            break;
+                        }
+                    }
+                }
+            })?;
+
+        Ok(Self {
+            queue,
+            cancel,
+            shutdown_stream,
+            thread,
+        })
+    }
+
+    fn cancel(self) {
+        self.cancel.store(true, Ordering::Release);
+        let _ = self.shutdown_stream.shutdown(Shutdown::Both);
+        let _ = self.thread.join();
+    }
+}
+
+fn resolve_socket_addr(addr: &str) -> anyhow::Result<SocketAddr> {
+    addr.to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid sync RTB address: {addr}"))
+}
+
+fn read_sync_error_message(stream: &mut TcpStream) -> anyhow::Result<String> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > 64 * 1024 {
+        anyhow::bail!("sync RTB error message too large: {len}");
+    }
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn read_sync_rtb_point(stream: &mut TcpStream) -> std::io::Result<Option<RtbDataPoint>> {
+    let mut len_buf = [0u8; 4];
+    match stream.read_exact(&mut len_buf) {
+        Ok(()) => {}
+        Err(e)
+            if e.kind() == std::io::ErrorKind::UnexpectedEof
+                || e.kind() == std::io::ErrorKind::ConnectionReset =>
+        {
+            return Ok(None)
+        }
+        Err(e) => return Err(e),
+    }
+
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len == 0 || len > 1024 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid sync RTB frame length: {len}"),
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf)?;
+    RtbDataPoint::decode(&buf[..])
+        .map(Some)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+pub struct SyncStreamHandle<T> {
+    queue: Arc<ArrayQueue<T>>,
+    cancel: Arc<AtomicBool>,
+    shutdown_stream: TcpStream,
+    thread: ThreadJoinHandle<()>,
+    finished: Arc<AtomicBool>,
+}
+
+impl<T> SyncStreamHandle<T>
+where
+    T: Message + Default + Send + 'static,
+{
+    fn start<R>(
+        addr: &str,
+        opcode: u8,
+        request: R,
+        capacity: usize,
+        thread_name: &'static str,
+        label: &'static str,
+    ) -> anyhow::Result<Self>
+    where
+        R: Message,
+    {
+        let socket_addr = resolve_socket_addr(addr)?;
+        let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2))?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+        let request_bytes = request.encode_to_vec();
+        stream.write_all(&[opcode])?;
+        stream.write_all(&(request_bytes.len() as u32).to_be_bytes())?;
+        stream.write_all(&request_bytes)?;
+        stream.flush()?;
+
+        let mut status = [0u8; 1];
+        stream.read_exact(&mut status)?;
+        if status[0] != 0 {
+            let message = read_sync_error_message(&mut stream)?;
+            anyhow::bail!("sync {label} start rejected: {message}");
+        }
+
+        stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+        let mut reader = stream.try_clone()?;
+        let shutdown_stream = stream.try_clone()?;
+        let queue = Arc::new(ArrayQueue::new(capacity));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let q = queue.clone();
+        let ct = cancel.clone();
+        let fin = finished.clone();
+
+        let thread = thread::Builder::new()
+            .name(thread_name.to_string())
+            .spawn(move || {
+                while !ct.load(Ordering::Acquire) {
+                    match read_sync_point::<T>(&mut reader) {
+                        Ok(Some(dp)) => match q.push(dp) {
+                            Ok(()) => {}
+                            Err(rejected) => {
+                                let _ = q.pop();
+                                let _ = q.push(rejected);
+                                log::trace!("sync {label} queue full, dropped oldest sample");
+                            }
+                        },
+                        Ok(None) => break,
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut => {}
+                        Err(e) => {
+                            log::warn!("sync {label} read failed: {e}");
+                            break;
+                        }
+                    }
+                }
+                fin.store(true, Ordering::Release);
+            })?;
+
+        Ok(Self {
+            queue,
+            cancel,
+            shutdown_stream,
+            thread,
+            finished,
+        })
+    }
+
+    fn poll(&self) -> Option<T> {
+        self.queue.pop()
+    }
+
+    fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
+    fn cancel(self) {
+        self.cancel.store(true, Ordering::Release);
+        let _ = self.shutdown_stream.shutdown(Shutdown::Both);
+        let _ = self.thread.join();
+    }
+}
+
+fn read_sync_point<T>(stream: &mut TcpStream) -> std::io::Result<Option<T>>
+where
+    T: Message + Default,
+{
+    let mut len_buf = [0u8; 4];
+    match stream.read_exact(&mut len_buf) {
+        Ok(()) => {}
+        Err(e)
+            if e.kind() == std::io::ErrorKind::UnexpectedEof
+                || e.kind() == std::io::ErrorKind::ConnectionReset =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    }
+
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len == 0 || len > 1024 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid sync stream frame length: {len}"),
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf)?;
+    T::decode(&buf[..])
+        .map(Some)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// A handle to an active CR (Cache Report) gRPC stream.
 ///
 /// Data points are pushed into a bounded lock-free queue by a background
 /// tokio task.  The FFI layer polls the queue non-blocking.
-pub struct CrStreamHandle {
+pub enum CrStreamHandle {
+    Grpc(GrpcCrStreamHandle),
+    Sync(SyncStreamHandle<CrDataPoint>),
+}
+
+pub struct GrpcCrStreamHandle {
     queue: Arc<ArrayQueue<CrDataPoint>>,
     cancel: CancellationToken,
     _task: JoinHandle<()>,
@@ -117,11 +404,7 @@ pub struct CrStreamHandle {
 impl CrStreamHandle {
     /// Spawn a background task that reads from the gRPC stream and pushes
     /// data points into the internal queue.
-    pub fn start(
-        rt: &Runtime,
-        mut stream: tonic::Streaming<CrDataPoint>,
-        capacity: usize,
-    ) -> Self {
+    pub fn start(rt: &Runtime, mut stream: tonic::Streaming<CrDataPoint>, capacity: usize) -> Self {
         let queue = Arc::new(ArrayQueue::new(capacity));
         let cancel = CancellationToken::new();
 
@@ -171,21 +454,43 @@ impl CrStreamHandle {
             }
         });
 
-        Self {
+        Self::Grpc(GrpcCrStreamHandle {
             queue,
             cancel,
             _task: task,
-        }
+        })
+    }
+
+    pub fn start_sync(
+        addr: &str,
+        request: CrStreamRequest,
+        capacity: usize,
+    ) -> anyhow::Result<Self> {
+        SyncStreamHandle::start(
+            addr,
+            SYNC_CMD_START_CR_STREAM,
+            request,
+            capacity,
+            "cr-sync-client",
+            "CR",
+        )
+        .map(Self::Sync)
     }
 
     /// Non-blocking poll: returns the next data point if available.
     pub fn poll(&self) -> Option<CrDataPoint> {
-        self.queue.pop()
+        match self {
+            Self::Grpc(handle) => handle.queue.pop(),
+            Self::Sync(handle) => handle.poll(),
+        }
     }
 
     /// Cancel the background stream task.
     pub fn cancel(self) {
-        self.cancel.cancel();
+        match self {
+            Self::Grpc(handle) => handle.cancel.cancel(),
+            Self::Sync(handle) => handle.cancel(),
+        }
     }
 }
 
@@ -193,7 +498,12 @@ impl CrStreamHandle {
 ///
 /// Data points are pushed into a bounded lock-free queue by a background
 /// tokio task.  The FFI layer polls the queue non-blocking.
-pub struct TcStreamHandle {
+pub enum TcStreamHandle {
+    Grpc(GrpcTcStreamHandle),
+    Sync(SyncStreamHandle<TcDataPoint>),
+}
+
+pub struct GrpcTcStreamHandle {
     queue: Arc<ArrayQueue<TcDataPoint>>,
     cancel: CancellationToken,
     _task: JoinHandle<()>,
@@ -202,11 +512,7 @@ pub struct TcStreamHandle {
 impl TcStreamHandle {
     /// Spawn a background task that reads from the gRPC stream and pushes
     /// data points into the internal queue.
-    pub fn start(
-        rt: &Runtime,
-        mut stream: tonic::Streaming<TcDataPoint>,
-        capacity: usize,
-    ) -> Self {
+    pub fn start(rt: &Runtime, mut stream: tonic::Streaming<TcDataPoint>, capacity: usize) -> Self {
         let queue = Arc::new(ArrayQueue::new(capacity));
         let cancel = CancellationToken::new();
 
@@ -256,21 +562,43 @@ impl TcStreamHandle {
             }
         });
 
-        Self {
+        Self::Grpc(GrpcTcStreamHandle {
             queue,
             cancel,
             _task: task,
-        }
+        })
+    }
+
+    pub fn start_sync(
+        addr: &str,
+        request: TcStreamRequest,
+        capacity: usize,
+    ) -> anyhow::Result<Self> {
+        SyncStreamHandle::start(
+            addr,
+            SYNC_CMD_START_TC_STREAM,
+            request,
+            capacity,
+            "tc-sync-client",
+            "TC",
+        )
+        .map(Self::Sync)
     }
 
     /// Non-blocking poll: returns the next data point if available.
     pub fn poll(&self) -> Option<TcDataPoint> {
-        self.queue.pop()
+        match self {
+            Self::Grpc(handle) => handle.queue.pop(),
+            Self::Sync(handle) => handle.poll(),
+        }
     }
 
     /// Cancel the background stream task.
     pub fn cancel(self) {
-        self.cancel.cancel();
+        match self {
+            Self::Grpc(handle) => handle.cancel.cancel(),
+            Self::Sync(handle) => handle.cancel(),
+        }
     }
 }
 
@@ -278,7 +606,12 @@ impl TcStreamHandle {
 ///
 /// CML is a finite-length benchmark (typically ~17 data points).
 /// The background task sets `is_finished` when the stream ends naturally.
-pub struct CmlStreamHandle {
+pub enum CmlStreamHandle {
+    Grpc(GrpcCmlStreamHandle),
+    Sync(SyncStreamHandle<CmlDataPoint>),
+}
+
+pub struct GrpcCmlStreamHandle {
     queue: Arc<ArrayQueue<CmlDataPoint>>,
     cancel: CancellationToken,
     _task: JoinHandle<()>,
@@ -346,28 +679,53 @@ impl CmlStreamHandle {
             }
         });
 
-        Self {
+        Self::Grpc(GrpcCmlStreamHandle {
             queue,
             cancel,
             _task: task,
             finished,
-        }
+        })
+    }
+
+    pub fn start_sync(
+        addr: &str,
+        request: CmlStreamRequest,
+        capacity: usize,
+    ) -> anyhow::Result<Self> {
+        SyncStreamHandle::start(
+            addr,
+            SYNC_CMD_START_CML_STREAM,
+            request,
+            capacity,
+            "cml-sync-client",
+            "CML",
+        )
+        .map(Self::Sync)
     }
 
     /// Non-blocking poll: returns the next data point if available.
     pub fn poll(&self) -> Option<CmlDataPoint> {
-        self.queue.pop()
+        match self {
+            Self::Grpc(handle) => handle.queue.pop(),
+            Self::Sync(handle) => handle.poll(),
+        }
     }
 
     /// Returns true if the background stream task has finished
     /// (benchmark complete or error).
     pub fn is_finished(&self) -> bool {
-        self.finished.load(Ordering::Acquire)
+        match self {
+            Self::Grpc(handle) => handle.finished.load(Ordering::Acquire),
+            Self::Sync(handle) => handle.is_finished(),
+        }
     }
 
     /// Cancel the background stream task.
     pub fn cancel(self) {
-        self.cancel.cancel();
+        match self {
+            Self::Grpc(handle) => handle.cancel.cancel(),
+            Self::Sync(handle) => handle.cancel(),
+        }
     }
 }
 
@@ -375,7 +733,12 @@ impl CmlStreamHandle {
 ///
 /// Data points are pushed into a bounded lock-free queue by a background
 /// tokio task.  The FFI layer polls the queue non-blocking.
-pub struct GcStreamHandle {
+pub enum GcStreamHandle {
+    Grpc(GrpcGcStreamHandle),
+    Sync(SyncStreamHandle<GcDataPoint>),
+}
+
+pub struct GrpcGcStreamHandle {
     queue: Arc<ArrayQueue<GcDataPoint>>,
     cancel: CancellationToken,
     _task: JoinHandle<()>,
@@ -384,11 +747,7 @@ pub struct GcStreamHandle {
 impl GcStreamHandle {
     /// Spawn a background task that reads from the gRPC stream and pushes
     /// data points into the internal queue.
-    pub fn start(
-        rt: &Runtime,
-        mut stream: tonic::Streaming<GcDataPoint>,
-        capacity: usize,
-    ) -> Self {
+    pub fn start(rt: &Runtime, mut stream: tonic::Streaming<GcDataPoint>, capacity: usize) -> Self {
         let queue = Arc::new(ArrayQueue::new(capacity));
         let cancel = CancellationToken::new();
 
@@ -438,20 +797,42 @@ impl GcStreamHandle {
             }
         });
 
-        Self {
+        Self::Grpc(GrpcGcStreamHandle {
             queue,
             cancel,
             _task: task,
-        }
+        })
+    }
+
+    pub fn start_sync(
+        addr: &str,
+        request: GcStreamRequest,
+        capacity: usize,
+    ) -> anyhow::Result<Self> {
+        SyncStreamHandle::start(
+            addr,
+            SYNC_CMD_START_GC_STREAM,
+            request,
+            capacity,
+            "gc-sync-client",
+            "GC",
+        )
+        .map(Self::Sync)
     }
 
     /// Non-blocking poll: returns the next data point if available.
     pub fn poll(&self) -> Option<GcDataPoint> {
-        self.queue.pop()
+        match self {
+            Self::Grpc(handle) => handle.queue.pop(),
+            Self::Sync(handle) => handle.poll(),
+        }
     }
 
     /// Cancel the background stream task.
     pub fn cancel(self) {
-        self.cancel.cancel();
+        match self {
+            Self::Grpc(handle) => handle.cancel.cancel(),
+            Self::Sync(handle) => handle.cancel(),
+        }
     }
 }
