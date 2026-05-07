@@ -5,9 +5,23 @@ use std::ffi::c_void;
 use std::ptr;
 
 use crate::adb;
-use crate::grpc;
 use crate::ffi::types::*;
 use crate::ffi::utils::*;
+use crate::grpc;
+use crate::proto::{
+    CmlStreamRequest, CrStreamRequest, GcStreamRequest, RtbStreamRequest, TcStreamRequest,
+};
+
+fn sync_control_addr(entry: &crate::ConnectionEntry) -> Option<String> {
+    if !entry.daemon_low_overhead {
+        return None;
+    }
+    sync_control_addr_for_port(entry.port)
+}
+
+fn sync_control_addr_for_port(port: u16) -> Option<String> {
+    port.checked_add(1).map(|port| format!("127.0.0.1:{port}"))
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -172,7 +186,10 @@ pub extern "C" fn profiler_connect_with_port(serial: *const u16, port: u16) -> P
             return ProfilerResult::OperationFailed;
         }
     };
-    if !devices.iter().any(|d| d.serial == serial_str && d.state == "device") {
+    if !devices
+        .iter()
+        .any(|d| d.serial == serial_str && d.state == "device")
+    {
         return ProfilerResult::DeviceNotFound;
     }
 
@@ -190,6 +207,7 @@ pub extern "C" fn profiler_connect_with_port(serial: *const u16, port: u16) -> P
                 serial: serial_str.clone(),
                 client,
                 port,
+                daemon_low_overhead: false,
             };
             crate::connections().lock().insert(serial_str, entry);
             ProfilerResult::Ok
@@ -223,6 +241,17 @@ pub extern "C" fn profiler_deploy_and_connect(
     remote_path: *const u16,
     port: u16,
 ) -> ProfilerResult {
+    profiler_deploy_and_connect_ex(serial, local_path, remote_path, port, true)
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_deploy_and_connect_ex(
+    serial: *const u16,
+    local_path: *const u16,
+    remote_path: *const u16,
+    port: u16,
+    daemon_low_overhead: bool,
+) -> ProfilerResult {
     if serial.is_null() || remote_path.is_null() {
         return ProfilerResult::InvalidParameter;
     }
@@ -247,7 +276,10 @@ pub extern "C" fn profiler_deploy_and_connect(
             return ProfilerResult::OperationFailed;
         }
     };
-    if !devices.iter().any(|d| d.serial == serial_str && d.state == "device") {
+    if !devices
+        .iter()
+        .any(|d| d.serial == serial_str && d.state == "device")
+    {
         return ProfilerResult::DeviceNotFound;
     }
 
@@ -257,6 +289,7 @@ pub extern "C" fn profiler_deploy_and_connect(
         &local_str,
         &remote_str,
         port,
+        daemon_low_overhead,
     )) {
         log::error!("profiler_deploy_and_connect: ensure_running_rooted failed: {e:#}");
         return ProfilerResult::OperationFailed;
@@ -274,22 +307,67 @@ pub extern "C" fn profiler_deploy_and_connect(
     let daemon_port = rt
         .block_on(adb::daemon::get_grpc_port(&serial_str))
         .unwrap_or(port);
-    log::info!(
-        "profiler_deploy_and_connect: requested port={port}, daemon_port={daemon_port}"
-    );
+    log::info!("profiler_deploy_and_connect: requested port={port}, daemon_port={daemon_port}");
     if let Err(e) = rt.block_on(adb::commands::forward(&serial_str, port, daemon_port)) {
         log::error!("profiler_deploy_and_connect: adb forward failed: {e:#}");
         return ProfilerResult::OperationFailed;
     }
 
-    // gRPC connect
+    if daemon_low_overhead {
+        match (port.checked_add(1), daemon_port.checked_add(1)) {
+            (Some(local_sync_port), Some(device_sync_port)) => {
+                if let Err(e) = rt.block_on(adb::commands::forward(
+                    &serial_str,
+                    local_sync_port,
+                    device_sync_port,
+                )) {
+                    log::warn!("profiler_deploy_and_connect: sync RTB adb forward failed: {e:#}");
+                }
+            }
+            _ => log::warn!("profiler_deploy_and_connect: sync RTB port overflow"),
+        }
+    }
+
     let addr = format!("http://127.0.0.1:{port}");
+    if daemon_low_overhead {
+        if let Some(sync_addr) = sync_control_addr_for_port(port) {
+            match grpc::sync_control::health(&sync_addr) {
+                Ok((version, status)) => {
+                    log::info!(
+                        "profiler_deploy_and_connect: sync control healthy version={version}, status={status}"
+                    );
+                    match rt.block_on(async { grpc::client::ProfilerClient::connect_lazy(&addr) }) {
+                        Ok(client) => {
+                            let entry = crate::ConnectionEntry {
+                                serial: serial_str.clone(),
+                                client,
+                                port,
+                                daemon_low_overhead,
+                            };
+                            crate::connections().lock().insert(serial_str, entry);
+                            return ProfilerResult::Ok;
+                        }
+                        Err(e) => {
+                            log::error!("profiler_deploy_and_connect: lazy gRPC client create failed: {e:#}");
+                            return ProfilerResult::OperationFailed;
+                        }
+                    }
+                }
+                Err(e) => log::warn!(
+                    "profiler_deploy_and_connect: sync control health failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+    }
+
+    // gRPC connect
     match rt.block_on(grpc::client::ProfilerClient::connect(&addr)) {
         Ok(client) => {
             let entry = crate::ConnectionEntry {
                 serial: serial_str.clone(),
                 client,
                 port,
+                daemon_low_overhead,
             };
             crate::connections().lock().insert(serial_str, entry);
             ProfilerResult::Ok
@@ -353,6 +431,21 @@ pub extern "C" fn profiler_health_check(
         None => return ProfilerResult::DeviceNotFound,
     };
 
+    if let Some(addr) = sync_control_addr(entry) {
+        match grpc::sync_control::health(&addr) {
+            Ok((version, status)) => {
+                unsafe {
+                    (*out).version = to_wide_ptr(&version);
+                    (*out).status = to_wide_ptr(&status);
+                }
+                return ProfilerResult::Ok;
+            }
+            Err(e) => log::warn!(
+                "profiler_health_check: sync control failed, falling back to gRPC: {e:#}"
+            ),
+        }
+    }
+
     match rt.block_on(entry.client.health()) {
         Ok((version, status)) => {
             unsafe {
@@ -408,6 +501,22 @@ pub extern "C" fn profiler_get_top_app(
         None => return ProfilerResult::DeviceNotFound,
     };
 
+    if let Some(addr) = sync_control_addr(entry) {
+        match grpc::sync_control::get_top_app(&addr) {
+            Ok(info) => {
+                unsafe {
+                    (*out).package_name = to_wide_ptr(&info.package_name);
+                    (*out).activity = to_wide_ptr(&info.activity);
+                    (*out).pid = info.pid;
+                }
+                return ProfilerResult::Ok;
+            }
+            Err(e) => {
+                log::warn!("profiler_get_top_app: sync control failed, falling back to gRPC: {e:#}")
+            }
+        }
+    }
+
     match rt.block_on(entry.client.get_top_app()) {
         Ok(info) => {
             unsafe {
@@ -458,9 +567,25 @@ pub extern "C" fn profiler_get_pid(
         None => return ProfilerResult::DeviceNotFound,
     };
 
+    if let Some(addr) = sync_control_addr(entry) {
+        match grpc::sync_control::get_pid(&addr, &package_str) {
+            Ok(pid) => {
+                unsafe {
+                    *pid_out = pid;
+                }
+                return ProfilerResult::Ok;
+            }
+            Err(e) => {
+                log::warn!("profiler_get_pid: sync control failed, falling back to gRPC: {e:#}")
+            }
+        }
+    }
+
     match rt.block_on(entry.client.get_pid(&package_str)) {
         Ok(pid) => {
-            unsafe { *pid_out = pid; }
+            unsafe {
+                *pid_out = pid;
+            }
             ProfilerResult::Ok
         }
         Err(e) => {
@@ -490,6 +615,7 @@ fn default_rtb_options_for_mode(mode: &str) -> grpc::client::RtbStreamOptions {
             enable_memory: false,
             enable_total_mips: false,
             enable_thread_mips: false,
+            warmup_secs: 0.0,
         }
     } else {
         grpc::client::RtbStreamOptions::default()
@@ -551,6 +677,7 @@ pub extern "C" fn profiler_start_rtb_ex(
             enable_memory: o.enable_memory,
             enable_total_mips: o.enable_total_mips,
             enable_thread_mips: o.enable_thread_mips,
+            warmup_secs: o.warmup_secs,
         }
     };
     let rt = crate::runtime();
@@ -561,12 +688,62 @@ pub extern "C" fn profiler_start_rtb_ex(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_rtb_stream(pid, interval_secs, &mode_str, rtb_options)) {
+    let sync_request = RtbStreamRequest {
+        pid,
+        interval_secs,
+        mode: mode_str.clone(),
+        enable_cpu_loading: rtb_options.enable_cpu_loading,
+        enable_cpu_freq: rtb_options.enable_cpu_freq,
+        enable_fps_dequeue: rtb_options.enable_fps_dequeue,
+        enable_fps_queue: rtb_options.enable_fps_queue,
+        enable_fps_present_fence: rtb_options.enable_fps_present_fence,
+        enable_gpu: rtb_options.enable_gpu,
+        use_dumpsys_fps: rtb_options.use_dumpsys_fps,
+        enable_power: rtb_options.enable_power,
+        enable_temperature: rtb_options.enable_temperature,
+        enable_dvfs: rtb_options.enable_dvfs,
+        enable_memory: rtb_options.enable_memory,
+        enable_total_mips: rtb_options.enable_total_mips,
+        enable_thread_mips: rtb_options.enable_thread_mips,
+        warmup_secs: rtb_options.warmup_secs,
+    };
+
+    if entry.daemon_low_overhead {
+        if let Some(sync_port) = entry.port.checked_add(1) {
+            let sync_addr = format!("127.0.0.1:{sync_port}");
+            match grpc::streaming::RtbStreamHandle::start_sync(&sync_addr, sync_request, 512) {
+                Ok(handle) => {
+                    let handle_id = crate::next_rtb_handle_id();
+                    crate::rtb_handles().lock().insert(handle_id, handle);
+                    unsafe {
+                        *handle_out = handle_id;
+                    }
+                    log::info!(
+                        "profiler_start_rtb_ex: using sync RTB control plane on {sync_addr}"
+                    );
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "profiler_start_rtb_ex: sync RTB start failed, falling back to gRPC: {e:#}"
+                    );
+                }
+            }
+        }
+    }
+
+    match rt.block_on(
+        entry
+            .client
+            .start_rtb_stream(pid, interval_secs, &mode_str, rtb_options),
+    ) {
         Ok(stream) => {
             let handle_id = crate::next_rtb_handle_id();
             let handle = grpc::streaming::RtbStreamHandle::start(rt, stream, 512);
             crate::rtb_handles().lock().insert(handle_id, handle);
-            unsafe { *handle_out = handle_id; }
+            unsafe {
+                *handle_out = handle_id;
+            }
             ProfilerResult::Ok
         }
         Err(e) => {
@@ -761,7 +938,28 @@ pub extern "C" fn profiler_start_perfetto(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_perfetto(pid, &mode_str, duration_secs, &pbtxt_str)) {
+    if let Some(addr) = sync_control_addr(entry) {
+        match grpc::sync_control::start_perfetto(&addr, pid, &mode_str, duration_secs, &pbtxt_str) {
+            Ok(resp) => {
+                if resp.success {
+                    return ProfilerResult::Ok;
+                }
+                let msg = format!("perfetto start rejected by sync daemon: {}", resp.message);
+                log::error!("profiler_start_perfetto: {msg}");
+                crate::set_last_error(&msg);
+                return ProfilerResult::OperationFailed;
+            }
+            Err(e) => log::warn!(
+                "profiler_start_perfetto: sync control failed, falling back to gRPC: {e:#}"
+            ),
+        }
+    }
+
+    match rt.block_on(
+        entry
+            .client
+            .start_perfetto(pid, &mode_str, duration_secs, &pbtxt_str),
+    ) {
         Ok(resp) => {
             if resp.success {
                 ProfilerResult::Ok
@@ -798,6 +996,22 @@ pub extern "C" fn profiler_get_perfetto_status(
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+
+    if let Some(addr) = sync_control_addr(entry) {
+        match grpc::sync_control::get_perfetto_status(&addr) {
+            Ok(status) => {
+                unsafe {
+                    (*out).state = status.state;
+                    (*out).progress_pct = status.progress_pct;
+                    (*out).output_path = to_wide_ptr(&status.output_path);
+                }
+                return ProfilerResult::Ok;
+            }
+            Err(e) => log::warn!(
+                "profiler_get_perfetto_status: sync control failed, falling back to gRPC: {e:#}"
+            ),
+        }
+    }
 
     match rt.block_on(entry.client.get_perfetto_status()) {
         Ok(status) => {
@@ -859,11 +1073,28 @@ pub extern "C" fn profiler_pull_file(
     // Wrap user_data in a Send-safe wrapper for the async block
     let user_data_val = user_data as usize;
 
-    match rt.block_on(entry.client.pull_file(&remote_str, &local_str, move |done, total| {
-        if let Some(callback) = cb {
-            callback(done, total, user_data_val as *mut c_void);
+    if let Some(addr) = sync_control_addr(entry) {
+        match grpc::sync_control::pull_file(&addr, &remote_str, &local_str, |done, total| {
+            if let Some(callback) = cb {
+                callback(done, total, user_data_val as *mut c_void);
+            }
+        }) {
+            Ok(()) => return ProfilerResult::Ok,
+            Err(e) => {
+                log::warn!("profiler_pull_file: sync control failed, falling back to gRPC: {e:#}")
+            }
         }
-    })) {
+    }
+
+    match rt.block_on(
+        entry
+            .client
+            .pull_file(&remote_str, &local_str, move |done, total| {
+                if let Some(callback) = cb {
+                    callback(done, total, user_data_val as *mut c_void);
+                }
+            }),
+    ) {
         Ok(()) => ProfilerResult::Ok,
         Err(e) => {
             log::error!("profiler_pull_file: {e:#}");
@@ -901,6 +1132,17 @@ pub extern "C" fn profiler_stop_recording(
         None => return ProfilerResult::DeviceNotFound,
     };
 
+    if type_str.is_empty() || type_str == "rtb" || type_str == "perfetto" {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::stop_recording(&addr, &type_str) {
+                Ok(_) => return ProfilerResult::Ok,
+                Err(e) => log::warn!(
+                    "profiler_stop_recording: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+    }
+
     match rt.block_on(entry.client.stop_recording(&type_str)) {
         Ok(_) => ProfilerResult::Ok,
         Err(e) => {
@@ -934,12 +1176,16 @@ pub extern "C" fn profiler_adb_shell(
 
         match rt.block_on(adb::commands::shell(&serial_str, &command_str)) {
             Ok(output) => {
-                unsafe { *out = to_wide_ptr(&output); }
+                unsafe {
+                    *out = to_wide_ptr(&output);
+                }
                 ProfilerResult::Ok
             }
             Err(e) => {
                 log::error!("profiler_adb_shell: {e:#}");
-                unsafe { *out = ptr::null_mut(); }
+                unsafe {
+                    *out = ptr::null_mut();
+                }
                 ProfilerResult::OperationFailed
             }
         }
@@ -965,10 +1211,7 @@ pub extern "C" fn profiler_adb_shell(
 /// On success `*out` is set to a newly-allocated wide string that the caller
 /// must free with `profiler_free_string`.
 #[no_mangle]
-pub extern "C" fn profiler_adb_root(
-    serial: *const u16,
-    out: *mut *mut u16,
-) -> ProfilerResult {
+pub extern "C" fn profiler_adb_root(serial: *const u16, out: *mut *mut u16) -> ProfilerResult {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if serial.is_null() || out.is_null() {
             return ProfilerResult::InvalidParameter;
@@ -978,12 +1221,16 @@ pub extern "C" fn profiler_adb_root(
 
         match rt.block_on(adb::commands::root(&serial_str)) {
             Ok(output) => {
-                unsafe { *out = to_wide_ptr(&output); }
+                unsafe {
+                    *out = to_wide_ptr(&output);
+                }
                 ProfilerResult::Ok
             }
             Err(e) => {
                 log::error!("profiler_adb_root: {e:#}");
-                unsafe { *out = ptr::null_mut(); }
+                unsafe {
+                    *out = ptr::null_mut();
+                }
                 ProfilerResult::OperationFailed
             }
         }
@@ -1009,10 +1256,7 @@ pub extern "C" fn profiler_adb_root(
 /// On success `*out` is set to a newly-allocated wide string that the caller
 /// must free with `profiler_free_string`.
 #[no_mangle]
-pub extern "C" fn profiler_adb_remount(
-    serial: *const u16,
-    out: *mut *mut u16,
-) -> ProfilerResult {
+pub extern "C" fn profiler_adb_remount(serial: *const u16, out: *mut *mut u16) -> ProfilerResult {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if serial.is_null() || out.is_null() {
             return ProfilerResult::InvalidParameter;
@@ -1022,12 +1266,16 @@ pub extern "C" fn profiler_adb_remount(
 
         match rt.block_on(adb::commands::remount(&serial_str)) {
             Ok(output) => {
-                unsafe { *out = to_wide_ptr(&output); }
+                unsafe {
+                    *out = to_wide_ptr(&output);
+                }
                 ProfilerResult::Ok
             }
             Err(e) => {
                 log::error!("profiler_adb_remount: {e:#}");
-                unsafe { *out = ptr::null_mut(); }
+                unsafe {
+                    *out = ptr::null_mut();
+                }
                 ProfilerResult::OperationFailed
             }
         }
@@ -1094,7 +1342,9 @@ pub extern "C" fn profiler_adb_pull(
 /// Free a wide string returned by `profiler_adb_shell`.
 #[no_mangle]
 pub extern "C" fn profiler_free_string(ptr: *mut u16) {
-    unsafe { free_wide_ptr(ptr); }
+    unsafe {
+        free_wide_ptr(ptr);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,14 +1411,18 @@ pub extern "C" fn profiler_wifi_adb_connect(
         match connect_result {
             Ok(result) => {
                 log::info!("profiler_wifi_adb_connect: success — {result}");
-                unsafe { *out = to_wide_ptr(&result); }
+                unsafe {
+                    *out = to_wide_ptr(&result);
+                }
                 ProfilerResult::Ok
             }
             Err(e) => {
                 let msg = format!("adb connect failed: {e:#}");
                 log::error!("profiler_wifi_adb_connect: {msg}");
                 crate::set_last_error(&msg);
-                unsafe { *out = ptr::null_mut(); }
+                unsafe {
+                    *out = ptr::null_mut();
+                }
                 ProfilerResult::OperationFailed
             }
         }
@@ -1213,14 +1467,18 @@ pub extern "C" fn profiler_wifi_adb_disconnect(
         match rt.block_on(adb::commands::disconnect(&serial_str)) {
             Ok(result) => {
                 log::info!("profiler_wifi_adb_disconnect: success — {result}");
-                unsafe { *out = to_wide_ptr(&result); }
+                unsafe {
+                    *out = to_wide_ptr(&result);
+                }
                 ProfilerResult::Ok
             }
             Err(e) => {
                 let msg = format!("adb disconnect failed: {e:#}");
                 log::error!("profiler_wifi_adb_disconnect: {msg}");
                 crate::set_last_error(&msg);
-                unsafe { *out = ptr::null_mut(); }
+                unsafe {
+                    *out = ptr::null_mut();
+                }
                 ProfilerResult::OperationFailed
             }
         }
@@ -1269,6 +1527,113 @@ macro_rules! with_connection {
     }};
 }
 
+fn package_fields_to_ffi(
+    package_name: &str,
+    apk_path: &str,
+    version_name: &str,
+    app_label: &str,
+    version_code: i32,
+    pid: i32,
+) -> ProfilerPackageInfo {
+    ProfilerPackageInfo {
+        package_name: to_wide_ptr(package_name),
+        apk_path: to_wide_ptr(apk_path),
+        version_name: to_wide_ptr(version_name),
+        app_label: to_wide_ptr(app_label),
+        version_code,
+        pid,
+    }
+}
+
+fn finish_package_list_to_ffi(
+    mut ffi_packages: Vec<ProfilerPackageInfo>,
+    out: *mut ProfilerPackageList,
+) -> ProfilerResult {
+    let count = ffi_packages.len();
+    let pkg_ptr = ffi_packages.as_mut_ptr();
+    std::mem::forget(ffi_packages);
+
+    unsafe {
+        (*out).packages = pkg_ptr;
+        (*out).count = count;
+    }
+    ProfilerResult::Ok
+}
+
+fn write_proto_package_list_to_ffi(
+    packages: &[crate::proto::PackageInfo],
+    out: *mut ProfilerPackageList,
+) -> ProfilerResult {
+    let ffi_packages: Vec<ProfilerPackageInfo> = packages
+        .iter()
+        .map(|p| {
+            package_fields_to_ffi(
+                &p.package_name,
+                &p.apk_path,
+                &p.version_name,
+                &p.app_label,
+                p.version_code,
+                p.pid,
+            )
+        })
+        .collect();
+    finish_package_list_to_ffi(ffi_packages, out)
+}
+
+fn write_client_package_list_to_ffi(
+    packages: &[grpc::client::PackageInfoResult],
+    out: *mut ProfilerPackageList,
+) -> ProfilerResult {
+    let ffi_packages: Vec<ProfilerPackageInfo> = packages
+        .iter()
+        .map(|p| {
+            package_fields_to_ffi(
+                &p.package_name,
+                &p.apk_path,
+                &p.version_name,
+                &p.app_label,
+                p.version_code,
+                p.pid,
+            )
+        })
+        .collect();
+    finish_package_list_to_ffi(ffi_packages, out)
+}
+
+fn write_proto_package_info_to_ffi(
+    info: &crate::proto::PackageInfo,
+    out: *mut ProfilerPackageInfo,
+) -> ProfilerResult {
+    unsafe {
+        *out = package_fields_to_ffi(
+            &info.package_name,
+            &info.apk_path,
+            &info.version_name,
+            &info.app_label,
+            info.version_code,
+            info.pid,
+        );
+    }
+    ProfilerResult::Ok
+}
+
+fn write_client_package_info_to_ffi(
+    info: &grpc::client::PackageInfoResult,
+    out: *mut ProfilerPackageInfo,
+) -> ProfilerResult {
+    unsafe {
+        *out = package_fields_to_ffi(
+            &info.package_name,
+            &info.apk_path,
+            &info.version_name,
+            &info.app_label,
+            info.version_code,
+            info.pid,
+        );
+    }
+    ProfilerResult::Ok
+}
+
 /// List installed packages.
 #[no_mangle]
 pub extern "C" fn profiler_list_packages(
@@ -1281,30 +1646,17 @@ pub extern "C" fn profiler_list_packages(
     }
 
     with_connection!(serial, |rt, entry| {
-        match rt.block_on(entry.client.list_packages(third_party_only)) {
-            Ok(packages) => {
-                let count = packages.len();
-                let mut ffi_packages: Vec<ProfilerPackageInfo> = packages
-                    .iter()
-                    .map(|p| ProfilerPackageInfo {
-                        package_name: to_wide_ptr(&p.package_name),
-                        apk_path: to_wide_ptr(&p.apk_path),
-                        version_name: to_wide_ptr(&p.version_name),
-                        app_label: to_wide_ptr(&p.app_label),
-                        version_code: p.version_code,
-                        pid: p.pid,
-                    })
-                    .collect();
-
-                let pkg_ptr = ffi_packages.as_mut_ptr();
-                std::mem::forget(ffi_packages);
-
-                unsafe {
-                    (*out).packages = pkg_ptr;
-                    (*out).count = count;
-                }
-                ProfilerResult::Ok
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::list_packages(&addr, third_party_only) {
+                Ok(packages) => return write_proto_package_list_to_ffi(&packages, out),
+                Err(e) => log::warn!(
+                    "profiler_list_packages: sync control failed, falling back to gRPC: {e:#}"
+                ),
             }
+        }
+
+        match rt.block_on(entry.client.list_packages(third_party_only)) {
+            Ok(packages) => write_client_package_list_to_ffi(&packages, out),
             Err(e) => {
                 log::error!("profiler_list_packages: {e:#}");
                 unsafe {
@@ -1353,18 +1705,17 @@ pub extern "C" fn profiler_get_package_info(
     let package_str = unsafe { from_wide_ptr(package) };
 
     with_connection!(serial, |rt, entry| {
-        match rt.block_on(entry.client.get_package_info(&package_str)) {
-            Ok(info) => {
-                unsafe {
-                    (*out).package_name = to_wide_ptr(&info.package_name);
-                    (*out).apk_path = to_wide_ptr(&info.apk_path);
-                    (*out).version_name = to_wide_ptr(&info.version_name);
-                    (*out).app_label = to_wide_ptr(&info.app_label);
-                    (*out).version_code = info.version_code;
-                    (*out).pid = info.pid;
-                }
-                ProfilerResult::Ok
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::get_package_info(&addr, &package_str) {
+                Ok(info) => return write_proto_package_info_to_ffi(&info, out),
+                Err(e) => log::warn!(
+                    "profiler_get_package_info: sync control failed, falling back to gRPC: {e:#}"
+                ),
             }
+        }
+
+        match rt.block_on(entry.client.get_package_info(&package_str)) {
+            Ok(info) => write_client_package_info_to_ffi(&info, out),
             Err(e) => {
                 log::error!("profiler_get_package_info: {e:#}");
                 ProfilerResult::OperationFailed
@@ -1393,19 +1744,33 @@ pub extern "C" fn profiler_free_package_info(info: *mut ProfilerPackageInfo) {
 
 /// Launch an app by package name.
 #[no_mangle]
-pub extern "C" fn profiler_launch_app(
-    serial: *const u16,
-    package: *const u16,
-) -> ProfilerResult {
+pub extern "C" fn profiler_launch_app(serial: *const u16, package: *const u16) -> ProfilerResult {
     if package.is_null() {
         return ProfilerResult::InvalidParameter;
     }
     let package_str = unsafe { from_wide_ptr(package) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::launch_app(&addr, &package_str) {
+                Ok(resp) => {
+                    if resp.success {
+                        return ProfilerResult::Ok;
+                    }
+                    log::error!("profiler_launch_app: {}", resp.message);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_launch_app: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.launch_app(&package_str)) {
             Ok(resp) => {
-                if resp.success { ProfilerResult::Ok } else {
+                if resp.success {
+                    ProfilerResult::Ok
+                } else {
                     log::error!("profiler_launch_app: {}", resp.message);
                     ProfilerResult::OperationFailed
                 }
@@ -1420,19 +1785,33 @@ pub extern "C" fn profiler_launch_app(
 
 /// Force-stop an app.
 #[no_mangle]
-pub extern "C" fn profiler_stop_app(
-    serial: *const u16,
-    package: *const u16,
-) -> ProfilerResult {
+pub extern "C" fn profiler_stop_app(serial: *const u16, package: *const u16) -> ProfilerResult {
     if package.is_null() {
         return ProfilerResult::InvalidParameter;
     }
     let package_str = unsafe { from_wide_ptr(package) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::stop_app(&addr, &package_str) {
+                Ok(resp) => {
+                    if resp.success {
+                        return ProfilerResult::Ok;
+                    }
+                    log::error!("profiler_stop_app: {}", resp.message);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_stop_app: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.stop_app(&package_str)) {
             Ok(resp) => {
-                if resp.success { ProfilerResult::Ok } else {
+                if resp.success {
+                    ProfilerResult::Ok
+                } else {
                     log::error!("profiler_stop_app: {}", resp.message);
                     ProfilerResult::OperationFailed
                 }
@@ -1462,6 +1841,22 @@ pub extern "C" fn profiler_shell(
     let command_str = unsafe { from_wide_ptr(command) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::shell(&addr, &command_str) {
+                Ok(result) => {
+                    unsafe {
+                        (*out).exit_code = result.exit_code;
+                        (*out).stdout = to_wide_ptr(&result.stdout);
+                        (*out).stderr = to_wide_ptr(&result.stderr);
+                    }
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => {
+                    log::warn!("profiler_shell: sync control failed, falling back to gRPC: {e:#}")
+                }
+            }
+        }
+
         match rt.block_on(entry.client.shell(&command_str)) {
             Ok(result) => {
                 unsafe {
@@ -1518,6 +1913,21 @@ pub extern "C" fn profiler_get_screen_size(
     }
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::get_screen_size(&addr) {
+                Ok((w, h)) => {
+                    unsafe {
+                        *width_out = w;
+                        *height_out = h;
+                    }
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => log::warn!(
+                    "profiler_get_screen_size: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.get_screen_size()) {
             Ok((w, h)) => {
                 unsafe {
@@ -1550,11 +1960,28 @@ pub extern "C" fn profiler_screenshot(
     let user_data_val = user_data as usize;
 
     with_connection!(serial, |rt, entry| {
-        match rt.block_on(entry.client.screenshot(quality, &local_str, move |done, total| {
-            if let Some(callback) = cb {
-                callback(done, total, user_data_val as *mut c_void);
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::screenshot(&addr, quality, &local_str, |done, total| {
+                if let Some(callback) = cb {
+                    callback(done, total, user_data_val as *mut c_void);
+                }
+            }) {
+                Ok(()) => return ProfilerResult::Ok,
+                Err(e) => log::warn!(
+                    "profiler_screenshot: sync control failed, falling back to gRPC: {e:#}"
+                ),
             }
-        })) {
+        }
+
+        match rt.block_on(
+            entry
+                .client
+                .screenshot(quality, &local_str, move |done, total| {
+                    if let Some(callback) = cb {
+                        callback(done, total, user_data_val as *mut c_void);
+                    }
+                }),
+        ) {
             Ok(()) => ProfilerResult::Ok,
             Err(e) => {
                 log::error!("profiler_screenshot: {e:#}");
@@ -1566,12 +1993,27 @@ pub extern "C" fn profiler_screenshot(
 
 /// Tap at the given coordinates.
 #[no_mangle]
-pub extern "C" fn profiler_input_tap(
-    serial: *const u16,
-    x: i32,
-    y: i32,
-) -> ProfilerResult {
+pub extern "C" fn profiler_input_tap(serial: *const u16, x: i32, y: i32) -> ProfilerResult {
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::input_tap(&addr, x, y) {
+                Ok(resp) if resp.success => return ProfilerResult::Ok,
+                Ok(resp) => {
+                    let msg = if resp.message.trim().is_empty() {
+                        "InputTap sync command returned failure".to_string()
+                    } else {
+                        resp.message
+                    };
+                    log::error!("profiler_input_tap: {msg}");
+                    crate::set_last_error(msg);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_input_tap: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.input_tap(x, y)) {
             Ok(_) => ProfilerResult::Ok,
             Err(e) => {
@@ -1593,6 +2035,25 @@ pub extern "C" fn profiler_input_swipe(
     duration_ms: i32,
 ) -> ProfilerResult {
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::input_swipe(&addr, x1, y1, x2, y2, duration_ms) {
+                Ok(resp) if resp.success => return ProfilerResult::Ok,
+                Ok(resp) => {
+                    let msg = if resp.message.trim().is_empty() {
+                        "InputSwipe sync command returned failure".to_string()
+                    } else {
+                        resp.message
+                    };
+                    log::error!("profiler_input_swipe: {msg}");
+                    crate::set_last_error(msg);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_input_swipe: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.input_swipe(x1, y1, x2, y2, duration_ms)) {
             Ok(_) => ProfilerResult::Ok,
             Err(e) => {
@@ -1605,20 +2066,47 @@ pub extern "C" fn profiler_input_swipe(
 
 /// Input text on the device.
 #[no_mangle]
-pub extern "C" fn profiler_input_text(
-    serial: *const u16,
-    text: *const u16,
-) -> ProfilerResult {
+pub extern "C" fn profiler_input_text(serial: *const u16, text: *const u16) -> ProfilerResult {
     if text.is_null() {
         return ProfilerResult::InvalidParameter;
     }
     let text_str = unsafe { from_wide_ptr(text) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::input_text(&addr, &text_str) {
+                Ok(resp) if resp.success => return ProfilerResult::Ok,
+                Ok(resp) => {
+                    let msg = if resp.message.trim().is_empty() {
+                        "InputText sync command returned failure".to_string()
+                    } else {
+                        resp.message
+                    };
+                    log::error!("profiler_input_text: {msg}");
+                    crate::set_last_error(msg);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_input_text: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.input_text(&text_str)) {
-            Ok(_) => ProfilerResult::Ok,
+            Ok(result) if result.success => ProfilerResult::Ok,
+            Ok(result) => {
+                let msg = if result.message.trim().is_empty() {
+                    "InputText RPC returned failure".to_string()
+                } else {
+                    result.message
+                };
+                log::error!("profiler_input_text: {msg}");
+                crate::set_last_error(msg);
+                ProfilerResult::OperationFailed
+            }
             Err(e) => {
                 log::error!("profiler_input_text: {e:#}");
+                crate::set_last_error(format!("InputText RPC failed: {e:#}"));
                 ProfilerResult::OperationFailed
             }
         }
@@ -1627,11 +2115,27 @@ pub extern "C" fn profiler_input_text(
 
 /// Send a key event.
 #[no_mangle]
-pub extern "C" fn profiler_input_key_event(
-    serial: *const u16,
-    key_code: i32,
-) -> ProfilerResult {
+pub extern "C" fn profiler_input_key_event(serial: *const u16, key_code: i32) -> ProfilerResult {
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::input_key_event(&addr, key_code) {
+                Ok(resp) if resp.success => return ProfilerResult::Ok,
+                Ok(resp) => {
+                    let msg = if resp.message.trim().is_empty() {
+                        "InputKeyEvent sync command returned failure".to_string()
+                    } else {
+                        resp.message
+                    };
+                    log::error!("profiler_input_key_event: {msg}");
+                    crate::set_last_error(msg);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_input_key_event: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.input_key_event(key_code)) {
             Ok(_) => ProfilerResult::Ok,
             Err(e) => {
@@ -1663,11 +2167,28 @@ pub extern "C" fn profiler_push_file(
     let user_data_val = user_data as usize;
 
     with_connection!(serial, |rt, entry| {
-        match rt.block_on(entry.client.push_file(&local_str, &remote_str, move |done, total| {
-            if let Some(callback) = cb {
-                callback(done, total, user_data_val as *mut c_void);
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::push_file(&addr, &local_str, &remote_str, |done, total| {
+                if let Some(callback) = cb {
+                    callback(done, total, user_data_val as *mut c_void);
+                }
+            }) {
+                Ok(_) => return ProfilerResult::Ok,
+                Err(e) => log::warn!(
+                    "profiler_push_file: sync control failed, falling back to gRPC: {e:#}"
+                ),
             }
-        })) {
+        }
+
+        match rt.block_on(
+            entry
+                .client
+                .push_file(&local_str, &remote_str, move |done, total| {
+                    if let Some(callback) = cb {
+                        callback(done, total, user_data_val as *mut c_void);
+                    }
+                }),
+        ) {
             Ok(_) => ProfilerResult::Ok,
             Err(e) => {
                 log::error!("profiler_push_file: {e:#}");
@@ -1698,14 +2219,32 @@ pub extern "C" fn profiler_get_device_prop(
     let prop_str = unsafe { from_wide_ptr(prop) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::get_device_prop(&addr, &prop_str) {
+                Ok(value) => {
+                    unsafe {
+                        *out = to_wide_ptr(&value);
+                    }
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => log::warn!(
+                    "profiler_get_device_prop: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.get_device_prop(&prop_str)) {
             Ok(value) => {
-                unsafe { *out = to_wide_ptr(&value); }
+                unsafe {
+                    *out = to_wide_ptr(&value);
+                }
                 ProfilerResult::Ok
             }
             Err(e) => {
                 log::error!("profiler_get_device_prop: {e:#}");
-                unsafe { *out = ptr::null_mut(); }
+                unsafe {
+                    *out = ptr::null_mut();
+                }
                 ProfilerResult::OperationFailed
             }
         }
@@ -1725,14 +2264,32 @@ pub extern "C" fn profiler_path_exists(
     let path_str = unsafe { from_wide_ptr(path) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::path_exists(&addr, &path_str) {
+                Ok(exists) => {
+                    unsafe {
+                        *out = exists;
+                    }
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => log::warn!(
+                    "profiler_path_exists: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.path_exists(&path_str)) {
             Ok(exists) => {
-                unsafe { *out = exists; }
+                unsafe {
+                    *out = exists;
+                }
                 ProfilerResult::Ok
             }
             Err(e) => {
                 log::error!("profiler_path_exists: {e:#}");
-                unsafe { *out = false; }
+                unsafe {
+                    *out = false;
+                }
                 ProfilerResult::OperationFailed
             }
         }
@@ -1754,6 +2311,22 @@ pub extern "C" fn profiler_get_temperature(
     }
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::get_temperature(&addr) {
+                Ok(temp) => {
+                    unsafe {
+                        (*out).battery_temp_c = temp.battery_temp_c;
+                        (*out).board_temp_c = temp.board_temp_c;
+                        (*out).battery_level_pct = temp.battery_level_pct;
+                    }
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => log::warn!(
+                    "profiler_get_temperature: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.get_temperature()) {
             Ok((battery, board, level)) => {
                 unsafe {
@@ -1809,6 +2382,125 @@ fn empty_thread_snapshot() -> ProfilerThreadSnapshot {
     }
 }
 
+fn write_rtb_summary_to_ffi(
+    summary: crate::proto::RtbSummary,
+    out: *mut ProfilerRtbSummary,
+) -> ProfilerResult {
+    let threads_count = summary.top_threads.len();
+    let mut ffi_threads: Vec<ProfilerThreadSnapshot> = summary
+        .top_threads
+        .iter()
+        .map(|ts| thread_snapshot_to_ffi(ts))
+        .collect();
+    let threads_ptr = if threads_count > 0 {
+        let p = ffi_threads.as_mut_ptr();
+        std::mem::forget(ffi_threads);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    let dists_count = summary.freq_distributions.len();
+    let mut ffi_dists: Vec<ProfilerFreqDistribution> = summary
+        .freq_distributions
+        .iter()
+        .map(|fd| {
+            let buckets_count = fd.buckets.len();
+            let mut ffi_buckets: Vec<ProfilerFreqBucket> = fd
+                .buckets
+                .iter()
+                .map(|b| ProfilerFreqBucket {
+                    freq_mhz: b.freq_mhz,
+                    count: b.count,
+                    percentage: b.percentage,
+                })
+                .collect();
+            let buckets_ptr = if buckets_count > 0 {
+                let p = ffi_buckets.as_mut_ptr();
+                std::mem::forget(ffi_buckets);
+                p
+            } else {
+                ptr::null_mut()
+            };
+            ProfilerFreqDistribution {
+                component: to_wide_ptr(&fd.component),
+                buckets: buckets_ptr,
+                buckets_count,
+            }
+        })
+        .collect();
+    let dists_ptr = if dists_count > 0 {
+        let p = ffi_dists.as_mut_ptr();
+        std::mem::forget(ffi_dists);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    let logical = summary
+        .logical_thread
+        .as_ref()
+        .map(|ts| thread_snapshot_to_ffi(ts))
+        .unwrap_or_else(empty_thread_snapshot);
+    let render = summary
+        .render_thread
+        .as_ref()
+        .map(|ts| thread_snapshot_to_ffi(ts))
+        .unwrap_or_else(empty_thread_snapshot);
+    let rhi = summary
+        .rhi_thread
+        .as_ref()
+        .map(|ts| thread_snapshot_to_ffi(ts))
+        .unwrap_or_else(empty_thread_snapshot);
+
+    let ft_count = summary.frame_times_ms.len();
+    let ft_ptr = if ft_count > 0 {
+        let mut ft_vec = summary.frame_times_ms.clone();
+        let p = ft_vec.as_mut_ptr();
+        std::mem::forget(ft_vec);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    let vsb_count = summary.vsync_sf_buckets.len();
+    let mut ffi_vsb: Vec<ProfilerVsyncSfBucket> = summary
+        .vsync_sf_buckets
+        .iter()
+        .map(|b| ProfilerVsyncSfBucket {
+            multiple: b.multiple,
+            center_ms: b.center_ms,
+            count: b.count,
+            percentage: b.percentage,
+        })
+        .collect();
+    let vsb_ptr = if vsb_count > 0 {
+        let p = ffi_vsb.as_mut_ptr();
+        std::mem::forget(ffi_vsb);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    unsafe {
+        (*out).top_threads = threads_ptr;
+        (*out).top_threads_count = threads_count;
+        (*out).freq_distributions = dists_ptr;
+        (*out).freq_distributions_count = dists_count;
+        (*out).logical_thread = logical;
+        (*out).render_thread = render;
+        (*out).rhi_thread = rhi;
+        (*out).start_temp = summary.start_temp;
+        (*out).end_temp = summary.end_temp;
+        (*out).frame_times_ms = ft_ptr;
+        (*out).frame_times_count = ft_count;
+        (*out).vsync_sf_buckets = vsb_ptr;
+        (*out).vsync_sf_buckets_count = vsb_count;
+        (*out).vsync_sf_base_interval_ms = summary.vsync_sf_base_interval_ms;
+    }
+    ProfilerResult::Ok
+}
+
 /// Get the RTB summary (post-recording statistics).
 #[no_mangle]
 pub extern "C" fn profiler_get_rtb_summary(
@@ -1820,126 +2512,17 @@ pub extern "C" fn profiler_get_rtb_summary(
     }
 
     with_connection!(serial, |rt, entry| {
-        match rt.block_on(entry.client.get_rtb_summary()) {
-            Ok(summary) => {
-                // Convert top_threads
-                let threads_count = summary.top_threads.len();
-                let mut ffi_threads: Vec<ProfilerThreadSnapshot> = summary
-                    .top_threads
-                    .iter()
-                    .map(|ts| thread_snapshot_to_ffi(ts))
-                    .collect();
-                let threads_ptr = if threads_count > 0 {
-                    let p = ffi_threads.as_mut_ptr();
-                    std::mem::forget(ffi_threads);
-                    p
-                } else {
-                    ptr::null_mut()
-                };
-
-                // Convert freq_distributions
-                let dists_count = summary.freq_distributions.len();
-                let mut ffi_dists: Vec<ProfilerFreqDistribution> = summary
-                    .freq_distributions
-                    .iter()
-                    .map(|fd| {
-                        let buckets_count = fd.buckets.len();
-                        let mut ffi_buckets: Vec<ProfilerFreqBucket> = fd
-                            .buckets
-                            .iter()
-                            .map(|b| ProfilerFreqBucket {
-                                freq_mhz: b.freq_mhz,
-                                count: b.count,
-                                percentage: b.percentage,
-                            })
-                            .collect();
-                        let buckets_ptr = if buckets_count > 0 {
-                            let p = ffi_buckets.as_mut_ptr();
-                            std::mem::forget(ffi_buckets);
-                            p
-                        } else {
-                            ptr::null_mut()
-                        };
-                        ProfilerFreqDistribution {
-                            component: to_wide_ptr(&fd.component),
-                            buckets: buckets_ptr,
-                            buckets_count,
-                        }
-                    })
-                    .collect();
-                let dists_ptr = if dists_count > 0 {
-                    let p = ffi_dists.as_mut_ptr();
-                    std::mem::forget(ffi_dists);
-                    p
-                } else {
-                    ptr::null_mut()
-                };
-
-                let logical = summary
-                    .logical_thread
-                    .as_ref()
-                    .map(|ts| thread_snapshot_to_ffi(ts))
-                    .unwrap_or_else(empty_thread_snapshot);
-                let render = summary
-                    .render_thread
-                    .as_ref()
-                    .map(|ts| thread_snapshot_to_ffi(ts))
-                    .unwrap_or_else(empty_thread_snapshot);
-                let rhi = summary
-                    .rhi_thread
-                    .as_ref()
-                    .map(|ts| thread_snapshot_to_ffi(ts))
-                    .unwrap_or_else(empty_thread_snapshot);
-
-                // Convert frame_times_ms
-                let ft_count = summary.frame_times_ms.len();
-                let ft_ptr = if ft_count > 0 {
-                    let mut ft_vec = summary.frame_times_ms.clone();
-                    let p = ft_vec.as_mut_ptr();
-                    std::mem::forget(ft_vec);
-                    p
-                } else {
-                    ptr::null_mut()
-                };
-
-                // Convert vsync_sf_buckets
-                let vsb_count = summary.vsync_sf_buckets.len();
-                let mut ffi_vsb: Vec<ProfilerVsyncSfBucket> = summary
-                    .vsync_sf_buckets
-                    .iter()
-                    .map(|b| ProfilerVsyncSfBucket {
-                        multiple: b.multiple,
-                        center_ms: b.center_ms,
-                        count: b.count,
-                        percentage: b.percentage,
-                    })
-                    .collect();
-                let vsb_ptr = if vsb_count > 0 {
-                    let p = ffi_vsb.as_mut_ptr();
-                    std::mem::forget(ffi_vsb);
-                    p
-                } else {
-                    ptr::null_mut()
-                };
-
-                unsafe {
-                    (*out).top_threads = threads_ptr;
-                    (*out).top_threads_count = threads_count;
-                    (*out).freq_distributions = dists_ptr;
-                    (*out).freq_distributions_count = dists_count;
-                    (*out).logical_thread = logical;
-                    (*out).render_thread = render;
-                    (*out).rhi_thread = rhi;
-                    (*out).start_temp = summary.start_temp;
-                    (*out).end_temp = summary.end_temp;
-                    (*out).frame_times_ms = ft_ptr;
-                    (*out).frame_times_count = ft_count;
-                    (*out).vsync_sf_buckets = vsb_ptr;
-                    (*out).vsync_sf_buckets_count = vsb_count;
-                    (*out).vsync_sf_base_interval_ms = summary.vsync_sf_base_interval_ms;
-                }
-                ProfilerResult::Ok
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::get_rtb_summary(&addr) {
+                Ok(summary) => return write_rtb_summary_to_ffi(summary, out),
+                Err(e) => log::warn!(
+                    "profiler_get_rtb_summary: sync control failed, falling back to gRPC: {e:#}"
+                ),
             }
+        }
+
+        match rt.block_on(entry.client.get_rtb_summary()) {
+            Ok(summary) => write_rtb_summary_to_ffi(summary, out),
             Err(e) => {
                 log::error!("profiler_get_rtb_summary: {e:#}");
                 ProfilerResult::OperationFailed
@@ -1982,7 +2565,11 @@ pub extern "C" fn profiler_free_rtb_summary(summary: *mut ProfilerRtbSummary) {
                 free_wide_ptr(fd.component);
                 fd.component = ptr::null_mut();
                 if !fd.buckets.is_null() && fd.buckets_count > 0 {
-                    drop(Vec::from_raw_parts(fd.buckets, fd.buckets_count, fd.buckets_count));
+                    drop(Vec::from_raw_parts(
+                        fd.buckets,
+                        fd.buckets_count,
+                        fd.buckets_count,
+                    ));
                 }
                 fd.buckets = ptr::null_mut();
                 fd.buckets_count = 0;
@@ -2028,9 +2615,26 @@ pub extern "C" fn profiler_install_apk(
     let path_str = unsafe { from_wide_ptr(remote_apk_path) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::install_apk(&addr, &path_str) {
+                Ok(resp) => {
+                    if resp.success {
+                        return ProfilerResult::Ok;
+                    }
+                    log::error!("profiler_install_apk: {}", resp.message);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_install_apk: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.install_apk(&path_str)) {
             Ok(resp) => {
-                if resp.success { ProfilerResult::Ok } else {
+                if resp.success {
+                    ProfilerResult::Ok
+                } else {
                     log::error!("profiler_install_apk: {}", resp.message);
                     ProfilerResult::OperationFailed
                 }
@@ -2062,15 +2666,34 @@ pub extern "C" fn profiler_get_surface_names(
     let package_str = unsafe { from_wide_ptr(package_name) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::get_surface_names(&addr, &package_str) {
+                Ok(names) => {
+                    let joined = names.join("\n");
+                    unsafe {
+                        *out = to_wide_ptr(&joined);
+                    }
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => log::warn!(
+                    "profiler_get_surface_names: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.get_surface_names(&package_str)) {
             Ok(names) => {
                 let joined = names.join("\n");
-                unsafe { *out = to_wide_ptr(&joined); }
+                unsafe {
+                    *out = to_wide_ptr(&joined);
+                }
                 ProfilerResult::Ok
             }
             Err(e) => {
                 log::error!("profiler_get_surface_names: {e:#}");
-                unsafe { *out = ptr::null_mut(); }
+                unsafe {
+                    *out = ptr::null_mut();
+                }
                 ProfilerResult::OperationFailed
             }
         }
@@ -2083,14 +2706,28 @@ pub extern "C" fn profiler_get_surface_names(
 
 /// Enable or disable charging on the device.
 #[no_mangle]
-pub extern "C" fn profiler_set_charging(
-    serial: *const u16,
-    enable: bool,
-) -> ProfilerResult {
+pub extern "C" fn profiler_set_charging(serial: *const u16, enable: bool) -> ProfilerResult {
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::set_charging(&addr, enable) {
+                Ok(resp) => {
+                    if resp.success {
+                        return ProfilerResult::Ok;
+                    }
+                    log::error!("profiler_set_charging: {}", resp.message);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_set_charging: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.set_charging(enable)) {
             Ok(resp) => {
-                if resp.success { ProfilerResult::Ok } else {
+                if resp.success {
+                    ProfilerResult::Ok
+                } else {
                     log::error!("profiler_set_charging: {}", resp.message);
                     ProfilerResult::OperationFailed
                 }
@@ -2109,19 +2746,33 @@ pub extern "C" fn profiler_set_charging(
 
 /// Remove a file on the device.
 #[no_mangle]
-pub extern "C" fn profiler_remove_file(
-    serial: *const u16,
-    path: *const u16,
-) -> ProfilerResult {
+pub extern "C" fn profiler_remove_file(serial: *const u16, path: *const u16) -> ProfilerResult {
     if path.is_null() {
         return ProfilerResult::InvalidParameter;
     }
     let path_str = unsafe { from_wide_ptr(path) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::remove_file(&addr, &path_str) {
+                Ok(resp) => {
+                    if resp.success {
+                        return ProfilerResult::Ok;
+                    }
+                    log::error!("profiler_remove_file: {}", resp.message);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_remove_file: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.remove_file(&path_str)) {
             Ok(resp) => {
-                if resp.success { ProfilerResult::Ok } else {
+                if resp.success {
+                    ProfilerResult::Ok
+                } else {
                     log::error!("profiler_remove_file: {}", resp.message);
                     ProfilerResult::OperationFailed
                 }
@@ -2150,9 +2801,30 @@ pub extern "C" fn profiler_create_archive(
     let output_str = unsafe { from_wide_ptr(output_path) };
 
     with_connection!(serial, |rt, entry| {
-        match rt.block_on(entry.client.create_archive(&dir_str, &target_str, &output_str)) {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::create_archive(&addr, &dir_str, &target_str, &output_str) {
+                Ok(resp) => {
+                    if resp.success {
+                        return ProfilerResult::Ok;
+                    }
+                    log::error!("profiler_create_archive: {}", resp.message);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_create_archive: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
+        match rt.block_on(
+            entry
+                .client
+                .create_archive(&dir_str, &target_str, &output_str),
+        ) {
             Ok(resp) => {
-                if resp.success { ProfilerResult::Ok } else {
+                if resp.success {
+                    ProfilerResult::Ok
+                } else {
                     log::error!("profiler_create_archive: {}", resp.message);
                     ProfilerResult::OperationFailed
                 }
@@ -2179,9 +2851,26 @@ pub extern "C" fn profiler_extract_archive(
     let archive_str = unsafe { from_wide_ptr(archive_path) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::extract_archive(&addr, &dir_str, &archive_str) {
+                Ok(resp) => {
+                    if resp.success {
+                        return ProfilerResult::Ok;
+                    }
+                    log::error!("profiler_extract_archive: {}", resp.message);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_extract_archive: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.extract_archive(&dir_str, &archive_str)) {
             Ok(resp) => {
-                if resp.success { ProfilerResult::Ok } else {
+                if resp.success {
+                    ProfilerResult::Ok
+                } else {
                     log::error!("profiler_extract_archive: {}", resp.message);
                     ProfilerResult::OperationFailed
                 }
@@ -2209,9 +2898,26 @@ pub extern "C" fn profiler_chmod(
     let mode_str = unsafe { from_wide_ptr(mode) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::chmod(&addr, &path_str, &mode_str, recursive) {
+                Ok(resp) => {
+                    if resp.success {
+                        return ProfilerResult::Ok;
+                    }
+                    log::error!("profiler_chmod: {}", resp.message);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => {
+                    log::warn!("profiler_chmod: sync control failed, falling back to gRPC: {e:#}")
+                }
+            }
+        }
+
         match rt.block_on(entry.client.chmod(&path_str, &mode_str, recursive)) {
             Ok(resp) => {
-                if resp.success { ProfilerResult::Ok } else {
+                if resp.success {
+                    ProfilerResult::Ok
+                } else {
                     log::error!("profiler_chmod: {}", resp.message);
                     ProfilerResult::OperationFailed
                 }
@@ -2239,9 +2945,26 @@ pub extern "C" fn profiler_chown(
     let path_str = unsafe { from_wide_ptr(path) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::chown(&addr, &path_str, uid, gid, recursive) {
+                Ok(resp) => {
+                    if resp.success {
+                        return ProfilerResult::Ok;
+                    }
+                    log::error!("profiler_chown: {}", resp.message);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => {
+                    log::warn!("profiler_chown: sync control failed, falling back to gRPC: {e:#}")
+                }
+            }
+        }
+
         match rt.block_on(entry.client.chown(&path_str, uid, gid, recursive)) {
             Ok(resp) => {
-                if resp.success { ProfilerResult::Ok } else {
+                if resp.success {
+                    ProfilerResult::Ok
+                } else {
                     log::error!("profiler_chown: {}", resp.message);
                     ProfilerResult::OperationFailed
                 }
@@ -2267,9 +2990,25 @@ pub extern "C" fn profiler_get_file_owner(
     let path_str = unsafe { from_wide_ptr(path) };
 
     with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::get_file_owner(&addr, &path_str) {
+                Ok(uid) => {
+                    unsafe {
+                        *uid_out = uid;
+                    }
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => log::warn!(
+                    "profiler_get_file_owner: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
         match rt.block_on(entry.client.get_file_owner(&path_str)) {
             Ok(uid) => {
-                unsafe { *uid_out = uid; }
+                unsafe {
+                    *uid_out = uid;
+                }
                 ProfilerResult::Ok
             }
             Err(e) => {
@@ -2323,12 +3062,49 @@ pub extern "C" fn profiler_start_cr(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_cr_stream(interval_secs, cpus_slice, exclude_kernel, diff_kernel, full_mode, events_slice)) {
+    let sync_request = CrStreamRequest {
+        interval_secs,
+        cpus: cpus_slice.to_vec(),
+        exclude_kernel,
+        full_mode,
+        custom_events: events_slice.to_vec(),
+        diff_kernel,
+    };
+
+    if entry.daemon_low_overhead {
+        if let Some(sync_addr) = sync_control_addr(entry) {
+            match grpc::streaming::CrStreamHandle::start_sync(&sync_addr, sync_request, 512) {
+                Ok(handle) => {
+                    let handle_id = crate::next_cr_handle_id();
+                    crate::cr_handles().lock().insert(handle_id, handle);
+                    unsafe {
+                        *handle_out = handle_id;
+                    }
+                    log::info!("profiler_start_cr: using sync CR stream on {sync_addr}");
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => log::warn!(
+                    "profiler_start_cr: sync CR start failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+    }
+
+    match rt.block_on(entry.client.start_cr_stream(
+        interval_secs,
+        cpus_slice,
+        exclude_kernel,
+        diff_kernel,
+        full_mode,
+        events_slice,
+    )) {
         Ok(stream) => {
             let handle_id = crate::next_cr_handle_id();
             let handle = grpc::streaming::CrStreamHandle::start(rt, stream, 512);
             crate::cr_handles().lock().insert(handle_id, handle);
-            unsafe { *handle_out = handle_id; }
+            unsafe {
+                *handle_out = handle_id;
+            }
             ProfilerResult::Ok
         }
         Err(e) => {
@@ -2340,9 +3116,7 @@ pub extern "C" fn profiler_start_cr(
 
 /// Convert a slice of proto CrCpuMetrics into a heap-allocated FFI array.
 /// Returns (ptr, count). Caller must free via Vec::from_raw_parts.
-fn proto_cpus_to_ffi(
-    cpus: &[crate::proto::CrCpuMetrics],
-) -> (*mut ProfilerCrCpuMetrics, usize) {
+fn proto_cpus_to_ffi(cpus: &[crate::proto::CrCpuMetrics]) -> (*mut ProfilerCrCpuMetrics, usize) {
     let count = cpus.len();
     if count == 0 {
         return (ptr::null_mut(), 0);
@@ -2484,7 +3258,11 @@ pub extern "C" fn profiler_free_cr_data(data: *mut ProfilerCrData) {
         let kernel_cpus_count = (*data).kernel_cpus_count;
         if !kernel_cpus_ptr.is_null() && kernel_cpus_count > 0 {
             free_cr_cpu_raw_deltas(kernel_cpus_ptr, kernel_cpus_count);
-            drop(Vec::from_raw_parts(kernel_cpus_ptr, kernel_cpus_count, kernel_cpus_count));
+            drop(Vec::from_raw_parts(
+                kernel_cpus_ptr,
+                kernel_cpus_count,
+                kernel_cpus_count,
+            ));
         }
         (*data).kernel_cpus = ptr::null_mut();
         (*data).kernel_cpus_count = 0;
@@ -2493,7 +3271,11 @@ pub extern "C" fn profiler_free_cr_data(data: *mut ProfilerCrData) {
         let include_cpus_count = (*data).include_cpus_count;
         if !include_cpus_ptr.is_null() && include_cpus_count > 0 {
             free_cr_cpu_raw_deltas(include_cpus_ptr, include_cpus_count);
-            drop(Vec::from_raw_parts(include_cpus_ptr, include_cpus_count, include_cpus_count));
+            drop(Vec::from_raw_parts(
+                include_cpus_ptr,
+                include_cpus_count,
+                include_cpus_count,
+            ));
         }
         (*data).include_cpus = ptr::null_mut();
         (*data).include_cpus_count = 0;
@@ -2538,12 +3320,51 @@ pub extern "C" fn profiler_start_tc(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_tc_stream(pid, interval_secs, exclude_kernel, diff_kernel, top_threads_count, full_mode, events_slice)) {
+    let sync_request = TcStreamRequest {
+        pid,
+        interval_secs,
+        exclude_kernel,
+        top_threads_count,
+        diff_kernel,
+        custom_events: events_slice.to_vec(),
+        full_mode,
+    };
+
+    if entry.daemon_low_overhead {
+        if let Some(sync_addr) = sync_control_addr(entry) {
+            match grpc::streaming::TcStreamHandle::start_sync(&sync_addr, sync_request, 512) {
+                Ok(handle) => {
+                    let handle_id = crate::next_tc_handle_id();
+                    crate::tc_handles().lock().insert(handle_id, handle);
+                    unsafe {
+                        *handle_out = handle_id;
+                    }
+                    log::info!("profiler_start_tc: using sync TC stream on {sync_addr}");
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => log::warn!(
+                    "profiler_start_tc: sync TC start failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+    }
+
+    match rt.block_on(entry.client.start_tc_stream(
+        pid,
+        interval_secs,
+        exclude_kernel,
+        diff_kernel,
+        top_threads_count,
+        full_mode,
+        events_slice,
+    )) {
         Ok(stream) => {
             let handle_id = crate::next_tc_handle_id();
             let handle = grpc::streaming::TcStreamHandle::start(rt, stream, 512);
             crate::tc_handles().lock().insert(handle_id, handle);
-            unsafe { *handle_out = handle_id; }
+            unsafe {
+                *handle_out = handle_id;
+            }
             ProfilerResult::Ok
         }
         Err(e) => {
@@ -2729,12 +3550,43 @@ pub extern "C" fn profiler_start_cml(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_cml_stream(cpus_slice, max_footprint_kb, min_footprint_kb)) {
+    let sync_request = CmlStreamRequest {
+        cpus: cpus_slice.to_vec(),
+        max_footprint_kb,
+        min_footprint_kb,
+    };
+
+    if entry.daemon_low_overhead {
+        if let Some(sync_addr) = sync_control_addr(entry) {
+            match grpc::streaming::CmlStreamHandle::start_sync(&sync_addr, sync_request, 64) {
+                Ok(handle) => {
+                    let handle_id = crate::next_cml_handle_id();
+                    crate::cml_handles().lock().insert(handle_id, handle);
+                    unsafe {
+                        *handle_out = handle_id;
+                    }
+                    log::info!("profiler_start_cml: using sync CML stream on {sync_addr}");
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => log::warn!(
+                    "profiler_start_cml: sync CML start failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+    }
+
+    match rt.block_on(
+        entry
+            .client
+            .start_cml_stream(cpus_slice, max_footprint_kb, min_footprint_kb),
+    ) {
         Ok(stream) => {
             let handle_id = crate::next_cml_handle_id();
             let handle = grpc::streaming::CmlStreamHandle::start(rt, stream, 64);
             crate::cml_handles().lock().insert(handle_id, handle);
-            unsafe { *handle_out = handle_id; }
+            unsafe {
+                *handle_out = handle_id;
+            }
             ProfilerResult::Ok
         }
         Err(e) => {
@@ -2853,6 +3705,154 @@ pub extern "C" fn profiler_cml_is_finished(handle: u64) -> bool {
 // Device Event Discovery (Ftrace + PMU)
 // ---------------------------------------------------------------------------
 
+fn write_ftrace_discover_to_ffi(
+    resp: crate::proto::DiscoverFtraceResponse,
+    out: *mut ProfilerFtraceDiscoverResult,
+) -> ProfilerResult {
+    let ready = if resp.ready { 1i32 } else { 0i32 };
+    let count = resp.events.len();
+    let events_ptr = if count > 0 {
+        let mut ffi_events: Vec<ProfilerFtraceEventInfo> = resp
+            .events
+            .iter()
+            .map(|e| ProfilerFtraceEventInfo {
+                category: to_wide_ptr(&e.category),
+                event_name: to_wide_ptr(&e.event_name),
+            })
+            .collect();
+        let p = ffi_events.as_mut_ptr();
+        std::mem::forget(ffi_events);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    unsafe {
+        (*out).events = events_ptr;
+        (*out).events_count = count;
+        (*out).ready = ready;
+    }
+    ProfilerResult::Ok
+}
+
+fn write_pmu_discover_to_ffi(
+    resp: crate::proto::DiscoverPmuResponse,
+    out: *mut ProfilerPmuDiscoverResult,
+) -> ProfilerResult {
+    let ready = if resp.ready { 1i32 } else { 0i32 };
+    let count = resp.events.len();
+    let events_ptr = if count > 0 {
+        let mut ffi_events: Vec<ProfilerPmuEventInfo> = resp
+            .events
+            .iter()
+            .map(|e| ProfilerPmuEventInfo {
+                index: e.index,
+                _pad0: 0,
+                name: to_wide_ptr(&e.name),
+                code: e.code,
+                category: to_wide_ptr(&e.category),
+                description: to_wide_ptr(&e.description),
+                is_core: if e.is_core { 1 } else { 0 },
+                is_supported: if e.is_supported { 1 } else { 0 },
+            })
+            .collect();
+        let p = ffi_events.as_mut_ptr();
+        std::mem::forget(ffi_events);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    unsafe {
+        (*out).events = events_ptr;
+        (*out).events_count = count;
+        (*out).ready = ready;
+    }
+    ProfilerResult::Ok
+}
+
+fn write_pmu_hw_counters_to_ffi(
+    resp: crate::proto::PmuHwCounterResponse,
+    out: *mut ProfilerPmuHwCounterResult,
+) -> ProfilerResult {
+    let ready = if resp.ready { 1i32 } else { 0i32 };
+    let count = resp.cpus.len();
+    let counters_ptr = if count > 0 {
+        let mut ffi_counters: Vec<ProfilerPmuHwCounter> = resp
+            .cpus
+            .iter()
+            .map(|c| ProfilerPmuHwCounter {
+                cpu: c.cpu,
+                counter_count: c.counter_count,
+            })
+            .collect();
+        let p = ffi_counters.as_mut_ptr();
+        std::mem::forget(ffi_counters);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    unsafe {
+        (*out).counters = counters_ptr;
+        (*out).count = count;
+        (*out).ready = ready;
+    }
+    ProfilerResult::Ok
+}
+
+fn write_gc_discover_to_ffi(
+    resp: crate::proto::GcDiscoverResponse,
+    out: *mut ProfilerGcDiscoverResult,
+) -> ProfilerResult {
+    let gpu_count = resp.gpus.len();
+    let gpus_ptr = if gpu_count > 0 {
+        let mut ffi_gpus: Vec<ProfilerGpuInfo> = resp
+            .gpus
+            .iter()
+            .map(|g| ProfilerGpuInfo {
+                device_number: g.device_number,
+                gpu_family: to_wide_ptr(&g.gpu_family),
+                num_shader_cores: g.num_shader_cores,
+                num_exec_engines: g.num_execution_engines,
+                bus_width: g.bus_width,
+                product_id: g.product_id,
+            })
+            .collect();
+        let p = ffi_gpus.as_mut_ptr();
+        std::mem::forget(ffi_gpus);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    let counter_count = resp.available_counters.len();
+    let counters_ptr = if counter_count > 0 {
+        let mut ffi_counters: Vec<ProfilerGpuCounterInfo> = resp
+            .available_counters
+            .iter()
+            .map(|c| ProfilerGpuCounterInfo {
+                counter_id: c.counter_id,
+                name: to_wide_ptr(&c.name),
+                units: to_wide_ptr(&c.units),
+            })
+            .collect();
+        let p = ffi_counters.as_mut_ptr();
+        std::mem::forget(ffi_counters);
+        p
+    } else {
+        ptr::null_mut()
+    };
+
+    unsafe {
+        (*out).gpus = gpus_ptr;
+        (*out).gpus_count = gpu_count;
+        (*out).counters = counters_ptr;
+        (*out).counters_count = counter_count;
+    }
+    ProfilerResult::Ok
+}
+
 /// Discover ftrace events cached by the daemon.
 ///
 /// On success, populates `out` with event list.
@@ -2874,33 +3874,17 @@ pub extern "C" fn profiler_discover_ftrace_events(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.discover_ftrace_events()) {
-        Ok(resp) => {
-            let ready = if resp.ready { 1i32 } else { 0i32 };
-            let count = resp.events.len();
-            let events_ptr = if count > 0 {
-                let mut ffi_events: Vec<ProfilerFtraceEventInfo> = resp
-                    .events
-                    .iter()
-                    .map(|e| ProfilerFtraceEventInfo {
-                        category: to_wide_ptr(&e.category),
-                        event_name: to_wide_ptr(&e.event_name),
-                    })
-                    .collect();
-                let p = ffi_events.as_mut_ptr();
-                std::mem::forget(ffi_events);
-                p
-            } else {
-                ptr::null_mut()
-            };
-
-            unsafe {
-                (*out).events = events_ptr;
-                (*out).events_count = count;
-                (*out).ready = ready;
-            }
-            ProfilerResult::Ok
+    if let Some(addr) = sync_control_addr(entry) {
+        match grpc::sync_control::discover_ftrace_events(&addr) {
+            Ok(resp) => return write_ftrace_discover_to_ffi(resp, out),
+            Err(e) => log::warn!(
+                "profiler_discover_ftrace_events: sync control failed, falling back to gRPC: {e:#}"
+            ),
         }
+    }
+
+    match rt.block_on(entry.client.discover_ftrace_events()) {
+        Ok(resp) => write_ftrace_discover_to_ffi(resp, out),
         Err(e) => {
             log::error!("profiler_discover_ftrace_events: {e:#}");
             ProfilerResult::OperationFailed
@@ -2951,39 +3935,17 @@ pub extern "C" fn profiler_discover_pmu_events(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.discover_pmu_events()) {
-        Ok(resp) => {
-            let ready = if resp.ready { 1i32 } else { 0i32 };
-            let count = resp.events.len();
-            let events_ptr = if count > 0 {
-                let mut ffi_events: Vec<ProfilerPmuEventInfo> = resp
-                    .events
-                    .iter()
-                    .map(|e| ProfilerPmuEventInfo {
-                        index: e.index,
-                        _pad0: 0,
-                        name: to_wide_ptr(&e.name),
-                        code: e.code,
-                        category: to_wide_ptr(&e.category),
-                        description: to_wide_ptr(&e.description),
-                        is_core: if e.is_core { 1 } else { 0 },
-                        is_supported: if e.is_supported { 1 } else { 0 },
-                    })
-                    .collect();
-                let p = ffi_events.as_mut_ptr();
-                std::mem::forget(ffi_events);
-                p
-            } else {
-                ptr::null_mut()
-            };
-
-            unsafe {
-                (*out).events = events_ptr;
-                (*out).events_count = count;
-                (*out).ready = ready;
-            }
-            ProfilerResult::Ok
+    if let Some(addr) = sync_control_addr(entry) {
+        match grpc::sync_control::discover_pmu_events(&addr) {
+            Ok(resp) => return write_pmu_discover_to_ffi(resp, out),
+            Err(e) => log::warn!(
+                "profiler_discover_pmu_events: sync control failed, falling back to gRPC: {e:#}"
+            ),
         }
+    }
+
+    match rt.block_on(entry.client.discover_pmu_events()) {
+        Ok(resp) => write_pmu_discover_to_ffi(resp, out),
         Err(e) => {
             log::error!("profiler_discover_pmu_events: {e:#}");
             ProfilerResult::OperationFailed
@@ -3035,33 +3997,17 @@ pub extern "C" fn profiler_get_pmu_hw_counters(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.get_pmu_hw_counters()) {
-        Ok(resp) => {
-            let ready = if resp.ready { 1i32 } else { 0i32 };
-            let count = resp.cpus.len();
-            let counters_ptr = if count > 0 {
-                let mut ffi_counters: Vec<ProfilerPmuHwCounter> = resp
-                    .cpus
-                    .iter()
-                    .map(|c| ProfilerPmuHwCounter {
-                        cpu: c.cpu,
-                        counter_count: c.counter_count,
-                    })
-                    .collect();
-                let p = ffi_counters.as_mut_ptr();
-                std::mem::forget(ffi_counters);
-                p
-            } else {
-                ptr::null_mut()
-            };
-
-            unsafe {
-                (*out).counters = counters_ptr;
-                (*out).count = count;
-                (*out).ready = ready;
-            }
-            ProfilerResult::Ok
+    if let Some(addr) = sync_control_addr(entry) {
+        match grpc::sync_control::get_pmu_hw_counters(&addr) {
+            Ok(resp) => return write_pmu_hw_counters_to_ffi(resp, out),
+            Err(e) => log::warn!(
+                "profiler_get_pmu_hw_counters: sync control failed, falling back to gRPC: {e:#}"
+            ),
         }
+    }
+
+    match rt.block_on(entry.client.get_pmu_hw_counters()) {
+        Ok(resp) => write_pmu_hw_counters_to_ffi(resp, out),
         Err(e) => {
             log::error!("profiler_get_pmu_hw_counters: {e:#}");
             ProfilerResult::OperationFailed
@@ -3108,57 +4054,17 @@ pub extern "C" fn profiler_discover_gpu_counters(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.discover_gpu_counters()) {
-        Ok(resp) => {
-            // Convert GPUs
-            let gpu_count = resp.gpus.len();
-            let gpus_ptr = if gpu_count > 0 {
-                let mut ffi_gpus: Vec<ProfilerGpuInfo> = resp
-                    .gpus
-                    .iter()
-                    .map(|g| ProfilerGpuInfo {
-                        device_number: g.device_number,
-                        gpu_family: to_wide_ptr(&g.gpu_family),
-                        num_shader_cores: g.num_shader_cores,
-                        num_exec_engines: g.num_execution_engines,
-                        bus_width: g.bus_width,
-                        product_id: g.product_id,
-                    })
-                    .collect();
-                let p = ffi_gpus.as_mut_ptr();
-                std::mem::forget(ffi_gpus);
-                p
-            } else {
-                ptr::null_mut()
-            };
-
-            // Convert counters
-            let counter_count = resp.available_counters.len();
-            let counters_ptr = if counter_count > 0 {
-                let mut ffi_counters: Vec<ProfilerGpuCounterInfo> = resp
-                    .available_counters
-                    .iter()
-                    .map(|c| ProfilerGpuCounterInfo {
-                        counter_id: c.counter_id,
-                        name: to_wide_ptr(&c.name),
-                        units: to_wide_ptr(&c.units),
-                    })
-                    .collect();
-                let p = ffi_counters.as_mut_ptr();
-                std::mem::forget(ffi_counters);
-                p
-            } else {
-                ptr::null_mut()
-            };
-
-            unsafe {
-                (*out).gpus = gpus_ptr;
-                (*out).gpus_count = gpu_count;
-                (*out).counters = counters_ptr;
-                (*out).counters_count = counter_count;
-            }
-            ProfilerResult::Ok
+    if let Some(addr) = sync_control_addr(entry) {
+        match grpc::sync_control::discover_gpu_counters(&addr) {
+            Ok(resp) => return write_gc_discover_to_ffi(resp, out),
+            Err(e) => log::warn!(
+                "profiler_discover_gpu_counters: sync control failed, falling back to gRPC: {e:#}"
+            ),
         }
+    }
+
+    match rt.block_on(entry.client.discover_gpu_counters()) {
+        Ok(resp) => write_gc_discover_to_ffi(resp, out),
         Err(e) => {
             log::error!("profiler_discover_gpu_counters: {e:#}");
             ProfilerResult::OperationFailed
@@ -3224,12 +4130,43 @@ pub extern "C" fn profiler_start_gc(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    match rt.block_on(entry.client.start_gc_stream(gpu_device_number, interval_secs, ids)) {
+    let sync_request = GcStreamRequest {
+        gpu_device_number,
+        interval_secs,
+        counter_ids: ids.to_vec(),
+    };
+
+    if entry.daemon_low_overhead {
+        if let Some(sync_addr) = sync_control_addr(entry) {
+            match grpc::streaming::GcStreamHandle::start_sync(&sync_addr, sync_request, 512) {
+                Ok(handle) => {
+                    let handle_id = crate::next_gc_handle_id();
+                    crate::gc_handles().lock().insert(handle_id, handle);
+                    unsafe {
+                        *handle_out = handle_id;
+                    }
+                    log::info!("profiler_start_gc: using sync GC stream on {sync_addr}");
+                    return ProfilerResult::Ok;
+                }
+                Err(e) => log::warn!(
+                    "profiler_start_gc: sync GC start failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+    }
+
+    match rt.block_on(
+        entry
+            .client
+            .start_gc_stream(gpu_device_number, interval_secs, ids),
+    ) {
         Ok(stream) => {
             let handle_id = crate::next_gc_handle_id();
             let handle = grpc::streaming::GcStreamHandle::start(rt, stream, 512);
             crate::gc_handles().lock().insert(handle_id, handle);
-            unsafe { *handle_out = handle_id; }
+            unsafe {
+                *handle_out = handle_id;
+            }
             ProfilerResult::Ok
         }
         Err(e) => {
@@ -3309,7 +4246,11 @@ pub extern "C" fn profiler_free_gc_data(data: *mut ProfilerGcData) {
         let counters_ptr = (*data).counters;
         let counters_count = (*data).counters_count;
         if !counters_ptr.is_null() && counters_count > 0 {
-            drop(Vec::from_raw_parts(counters_ptr, counters_count, counters_count));
+            drop(Vec::from_raw_parts(
+                counters_ptr,
+                counters_count,
+                counters_count,
+            ));
         }
         (*data).counters = ptr::null_mut();
         (*data).counters_count = 0;
@@ -3419,7 +4360,9 @@ pub extern "C" fn profiler_daq_load_config(
         Ok(config) => {
             let id = crate::next_daq_config_id();
             crate::daq_configs().lock().insert(id, config);
-            unsafe { *out_handle = id; }
+            unsafe {
+                *out_handle = id;
+            }
             ProfilerResult::Ok
         }
         Err(e) => {
@@ -3576,7 +4519,9 @@ pub extern "C" fn profiler_daq_start(
         Ok(handle) => {
             let id = crate::next_daq_handle_id();
             crate::daq_handles().lock().insert(id, handle);
-            unsafe { *out_handle = id; }
+            unsafe {
+                *out_handle = id;
+            }
             ProfilerResult::Ok
         }
         Err(e) => {
@@ -3649,10 +4594,7 @@ pub extern "C" fn profiler_daq_free_errors(errors: *mut ProfilerDaqErrors) {
 
 /// Poll DAQ for next data point. Returns true if data was available.
 #[no_mangle]
-pub extern "C" fn profiler_daq_poll(
-    handle: u64,
-    data: *mut ProfilerDaqPollData,
-) -> bool {
+pub extern "C" fn profiler_daq_poll(handle: u64, data: *mut ProfilerDaqPollData) -> bool {
     if data.is_null() {
         return false;
     }
@@ -3786,7 +4728,9 @@ pub extern "C" fn profiler_daq_stop(
                     min: ch.min,
                     max: ch.max,
                     rms: ch.rms,
-                    color_rgb: ((ch.color_r as u32) << 16) | ((ch.color_g as u32) << 8) | (ch.color_b as u32),
+                    color_rgb: ((ch.color_r as u32) << 16)
+                        | ((ch.color_g as u32) << 8)
+                        | (ch.color_b as u32),
                     is_current: if ch.is_current { 1 } else { 0 },
                     pair_index: ch.pair_index,
                 })

@@ -114,6 +114,7 @@ pub struct ProfilerRtbOptions {
     pub enable_memory: bool,
     pub enable_total_mips: bool,
     pub enable_thread_mips: bool,
+    pub warmup_secs: f64,
 }
 
 /// Status of a Perfetto trace session.
@@ -303,7 +304,7 @@ pub struct ProfilerRawEventDelta {
 #[repr(C)]
 pub struct ProfilerTcThreadMetrics {
     pub thread_id: i32,
-    pub thread_name: *mut u16,    // UTF-16 null-terminated
+    pub thread_name: *mut u16, // UTF-16 null-terminated
     pub mips: f64,
     pub mcps: f64,
     pub cpi: f64,
@@ -363,8 +364,8 @@ pub struct ProfilerCmlData {
 /// A single ftrace event discovered on the device.
 #[repr(C)]
 pub struct ProfilerFtraceEventInfo {
-    pub category: *mut u16,      // UTF-16
-    pub event_name: *mut u16,    // UTF-16
+    pub category: *mut u16,   // UTF-16
+    pub event_name: *mut u16, // UTF-16
 }
 
 /// Ftrace discovery result.
@@ -379,13 +380,13 @@ pub struct ProfilerFtraceDiscoverResult {
 #[repr(C)]
 pub struct ProfilerPmuEventInfo {
     pub index: u32,
-    pub _pad0: u32,              // explicit padding (pointer alignment)
-    pub name: *mut u16,          // UTF-16
+    pub _pad0: u32,     // explicit padding (pointer alignment)
+    pub name: *mut u16, // UTF-16
     pub code: u64,
-    pub category: *mut u16,      // UTF-16
-    pub description: *mut u16,   // UTF-16
-    pub is_core: i32,            // 0/1
-    pub is_supported: i32,       // 0/1
+    pub category: *mut u16,    // UTF-16
+    pub description: *mut u16, // UTF-16
+    pub is_core: i32,          // 0/1
+    pub is_supported: i32,     // 0/1
 }
 
 /// PMU discovery result.
@@ -424,7 +425,7 @@ pub struct ProfilerPmuHwCounterResult {
 pub struct ProfilerGpuInfo {
     pub device_number: u32,
     // 4 bytes padding (pointer alignment)
-    pub gpu_family: *mut u16,    // UTF-16 null-terminated
+    pub gpu_family: *mut u16, // UTF-16 null-terminated
     pub num_shader_cores: u32,
     pub num_exec_engines: u32,
     pub bus_width: u32,
@@ -437,8 +438,8 @@ pub struct ProfilerGpuInfo {
 pub struct ProfilerGpuCounterInfo {
     pub counter_id: u32,
     // 4 bytes padding (pointer alignment)
-    pub name: *mut u16,          // UTF-16 null-terminated
-    pub units: *mut u16,         // UTF-16 null-terminated
+    pub name: *mut u16,  // UTF-16 null-terminated
+    pub units: *mut u16, // UTF-16 null-terminated
 }
 
 /// Discovery result containing GPU info and available counters.
@@ -473,8 +474,8 @@ pub struct ProfilerGcData {
 /// A single NI-DAQmx device.
 #[repr(C)]
 pub struct ProfilerDaqDevice {
-    pub name: *mut u16,           // UTF-16
-    pub product_type: *mut u16,   // UTF-16
+    pub name: *mut u16,         // UTF-16
+    pub product_type: *mut u16, // UTF-16
     pub serial_number: u32,
     pub ai_channel_count: u32,
 }
@@ -489,7 +490,7 @@ pub struct ProfilerDaqDeviceList {
 /// Config info returned after loading a DAQ Excel file.
 #[repr(C)]
 pub struct ProfilerDaqConfigInfo {
-    pub channel_names: *mut *mut u16,   // array of UTF-16 strings
+    pub channel_names: *mut *mut u16, // array of UTF-16 strings
     pub channel_count: usize,
     pub power_pair_names: *mut *mut u16, // array of UTF-16 strings
     pub power_pair_count: usize,
@@ -522,9 +523,9 @@ pub struct ProfilerDaqChannelStats {
     pub min: f64,
     pub max: f64,
     pub rms: f64,
-    pub color_rgb: u32,       // 0x00RRGGBB
-    pub is_current: i32,      // 0/1
-    pub pair_index: i32,      // -1 if none
+    pub color_rgb: u32,  // 0x00RRGGBB
+    pub is_current: i32, // 0/1
+    pub pair_index: i32, // -1 if none
 }
 
 /// Power pair breakdown entry.

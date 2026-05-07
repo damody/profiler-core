@@ -6,12 +6,11 @@ use crate::proto::profiler_service_client::ProfilerServiceClient;
 use crate::proto::{
     ChmodRequest, ChownRequest, CmlStreamRequest, CrStreamRequest, CreateArchiveRequest,
     DevicePropRequest, Empty, ExtractArchiveRequest, FileUploadChunk, GcDiscoverRequest,
-    GcStreamRequest, GetFileOwnerRequest,
-    GetPidRequest, GetSurfaceNamesRequest, InputKeyEventRequest, InputSwipeRequest,
-    InputTapRequest, InputTextRequest, InstallApkRequest, ListPackagesRequest, PackageRequest,
-    PathExistsRequest, PerfettoRequest, PerfettoResponse, PullFileRequest, RemoveFileRequest,
-    RtbStreamRequest, RtbSummaryRequest, ScreenshotRequest, SetChargingRequest, ShellRequest,
-    StopRecordingRequest, StopResponse, TcStreamRequest,
+    GcStreamRequest, GetFileOwnerRequest, GetPidRequest, GetSurfaceNamesRequest,
+    InputKeyEventRequest, InputSwipeRequest, InputTapRequest, InputTextRequest, InstallApkRequest,
+    ListPackagesRequest, PackageRequest, PathExistsRequest, PerfettoRequest, PerfettoResponse,
+    PullFileRequest, RemoveFileRequest, RtbStreamRequest, RtbSummaryRequest, ScreenshotRequest,
+    SetChargingRequest, ShellRequest, StopRecordingRequest, StopResponse, TcStreamRequest,
 };
 
 /// High-level wrapper around the gRPC ProfilerServiceClient.
@@ -72,6 +71,7 @@ pub struct RtbStreamOptions {
     pub enable_memory: bool,
     pub enable_total_mips: bool,
     pub enable_thread_mips: bool,
+    pub warmup_secs: f64,
 }
 
 impl Default for RtbStreamOptions {
@@ -90,6 +90,7 @@ impl Default for RtbStreamOptions {
             enable_memory: true,
             enable_total_mips: true,
             enable_thread_mips: true,
+            warmup_secs: 0.0,
         }
     }
 }
@@ -103,6 +104,24 @@ impl ProfilerClient {
             .connect()
             .await
             .context("Failed to connect to gRPC server")?;
+
+        let mut client = ProfilerServiceClient::new(channel);
+        if crate::grpc_compression_enabled() {
+            client = client
+                .send_compressed(tonic::codec::CompressionEncoding::Zstd)
+                .accept_compressed(tonic::codec::CompressionEncoding::Zstd);
+        }
+        Ok(Self { inner: client })
+    }
+
+    /// Create a client without eagerly connecting.
+    ///
+    /// Low-overhead sync-only daemons do not expose tonic, but the FFI
+    /// connection entry still carries this client for legacy fallback paths.
+    pub fn connect_lazy(addr: &str) -> Result<Self> {
+        let channel = Channel::from_shared(addr.to_string())
+            .context("Invalid gRPC address")?
+            .connect_lazy();
 
         let mut client = ProfilerServiceClient::new(channel);
         if crate::grpc_compression_enabled() {
@@ -179,6 +198,7 @@ impl ProfilerClient {
                 enable_memory: options.enable_memory,
                 enable_total_mips: options.enable_total_mips,
                 enable_thread_mips: options.enable_thread_mips,
+                warmup_secs: options.warmup_secs,
             })
             .await
             .context("StartRtbStream RPC failed")?;
@@ -312,8 +332,8 @@ impl ProfilerClient {
             .context("PullFile RPC failed")?
             .into_inner();
 
-        let mut file = std::fs::File::create(local_path)
-            .context("Failed to create local output file")?;
+        let mut file =
+            std::fs::File::create(local_path).context("Failed to create local output file")?;
 
         let mut bytes_received: u64 = 0;
 
@@ -369,7 +389,10 @@ impl ProfilerClient {
     // =========================================================================
 
     /// List installed packages.
-    pub async fn list_packages(&mut self, third_party_only: bool) -> Result<Vec<PackageInfoResult>> {
+    pub async fn list_packages(
+        &mut self,
+        third_party_only: bool,
+    ) -> Result<Vec<PackageInfoResult>> {
         let resp = self
             .inner
             .list_packages(ListPackagesRequest { third_party_only })
@@ -518,12 +541,16 @@ impl ProfilerClient {
             .context("Screenshot RPC failed")?
             .into_inner();
 
-        let mut file = std::fs::File::create(local_path)
-            .context("Failed to create screenshot output file")?;
+        let mut file =
+            std::fs::File::create(local_path).context("Failed to create screenshot output file")?;
 
         let mut bytes_received: u64 = 0;
 
-        while let Some(chunk) = stream.message().await.context("Error reading screenshot chunk")? {
+        while let Some(chunk) = stream
+            .message()
+            .await
+            .context("Error reading screenshot chunk")?
+        {
             file.write_all(&chunk.data)
                 .context("Failed to write screenshot chunk")?;
             bytes_received += chunk.data.len() as u64;
@@ -644,8 +671,8 @@ impl ProfilerClient {
 
         loop {
             let mut buf = vec![0u8; chunk_size];
-            let n = std::io::Read::read(&mut reader, &mut buf)
-                .context("Failed to read local file")?;
+            let n =
+                std::io::Read::read(&mut reader, &mut buf).context("Failed to read local file")?;
             if n == 0 {
                 break;
             }
@@ -654,7 +681,11 @@ impl ProfilerClient {
             let is_last = bytes_sent >= file_size;
 
             chunks.push(FileUploadChunk {
-                remote_path: if chunks.is_empty() { remote.clone() } else { String::new() },
+                remote_path: if chunks.is_empty() {
+                    remote.clone()
+                } else {
+                    String::new()
+                },
                 data: buf,
                 is_last,
             });
@@ -726,7 +757,11 @@ impl ProfilerClient {
             .await
             .context("GetTemperature RPC failed")?
             .into_inner();
-        Ok((resp.battery_temp_c, resp.board_temp_c, resp.battery_level_pct))
+        Ok((
+            resp.battery_temp_c,
+            resp.board_temp_c,
+            resp.battery_level_pct,
+        ))
     }
 
     // =========================================================================
@@ -844,7 +879,12 @@ impl ProfilerClient {
     }
 
     /// Change file permissions on the device.
-    pub async fn chmod(&mut self, path: &str, mode: &str, recursive: bool) -> Result<GenericResult> {
+    pub async fn chmod(
+        &mut self,
+        path: &str,
+        mode: &str,
+        recursive: bool,
+    ) -> Result<GenericResult> {
         let resp = self
             .inner
             .chmod(ChmodRequest {
@@ -862,7 +902,13 @@ impl ProfilerClient {
     }
 
     /// Change file ownership on the device.
-    pub async fn chown(&mut self, path: &str, uid: i32, gid: i32, recursive: bool) -> Result<GenericResult> {
+    pub async fn chown(
+        &mut self,
+        path: &str,
+        uid: i32,
+        gid: i32,
+        recursive: bool,
+    ) -> Result<GenericResult> {
         let resp = self
             .inner
             .chown(ChownRequest {
@@ -898,9 +944,7 @@ impl ProfilerClient {
     // =========================================================================
 
     /// Discover ftrace events cached by the daemon.
-    pub async fn discover_ftrace_events(
-        &mut self,
-    ) -> Result<crate::proto::DiscoverFtraceResponse> {
+    pub async fn discover_ftrace_events(&mut self) -> Result<crate::proto::DiscoverFtraceResponse> {
         let resp = self
             .inner
             .discover_ftrace_events(Empty {})
@@ -911,9 +955,7 @@ impl ProfilerClient {
     }
 
     /// Discover PMU events cached by the daemon.
-    pub async fn discover_pmu_events(
-        &mut self,
-    ) -> Result<crate::proto::DiscoverPmuResponse> {
+    pub async fn discover_pmu_events(&mut self) -> Result<crate::proto::DiscoverPmuResponse> {
         let resp = self
             .inner
             .discover_pmu_events(Empty {})
@@ -924,9 +966,7 @@ impl ProfilerClient {
     }
 
     /// Get PMU hardware counter counts per CPU.
-    pub async fn get_pmu_hw_counters(
-        &mut self,
-    ) -> Result<crate::proto::PmuHwCounterResponse> {
+    pub async fn get_pmu_hw_counters(&mut self) -> Result<crate::proto::PmuHwCounterResponse> {
         let resp = self
             .inner
             .get_pmu_hw_counters(Empty {})
@@ -941,9 +981,7 @@ impl ProfilerClient {
     // =========================================================================
 
     /// Discover Mali GPUs and available counters on the device.
-    pub async fn discover_gpu_counters(
-        &mut self,
-    ) -> Result<crate::proto::GcDiscoverResponse> {
+    pub async fn discover_gpu_counters(&mut self) -> Result<crate::proto::GcDiscoverResponse> {
         let resp = self
             .inner
             .discover_gpu_counters(GcDiscoverRequest {})
