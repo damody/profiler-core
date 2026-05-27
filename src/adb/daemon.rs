@@ -103,11 +103,11 @@ async fn start_daemon(
     let root_mode = ensure_root_and_permissive(serial).await;
 
     // Kill any existing instance
-    let _ = commands::shell(serial, "pkill -f realtime_profile").await;
+    let _ = commands::shell(serial, daemon_pkill_command()).await;
     // If a root daemon is running and we're non-root shell, pkill may fail — try su
     if root_mode == RootMode::Su && is_running(serial).await {
         log::info!("[{serial}] pkill 未能殺掉 root daemon，使用 su -c pkill");
-        let _ = commands::shell(serial, "su -c \"pkill -f realtime_profile\"").await;
+        let _ = commands::shell(serial, daemon_su_pkill_command()).await;
     }
     // Poll until process is dead (up to 2s)
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -250,10 +250,10 @@ pub async fn get_daemon_uid(serial: &str) -> Option<u32> {
 
 /// Kill the daemon, using `su -c pkill` as fallback if regular pkill fails.
 async fn kill_daemon(serial: &str) {
-    let _ = commands::shell(serial, "pkill -f realtime_profile").await;
+    let _ = commands::shell(serial, daemon_pkill_command()).await;
     if is_running(serial).await {
         log::info!("[{serial}] pkill 未能殺掉 daemon，嘗試 su -c pkill");
-        let _ = commands::shell(serial, "su -c \"pkill -f realtime_profile\"").await;
+        let _ = commands::shell(serial, daemon_su_pkill_command()).await;
     }
     // Poll until process is dead (up to 2s)
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -267,6 +267,14 @@ async fn kill_daemon(serial: &str) {
             break;
         }
     }
+}
+
+fn daemon_pkill_command() -> &'static str {
+    "pkill -f '[r]ealtime_profile'"
+}
+
+fn daemon_su_pkill_command() -> &'static str {
+    "su -c \"pkill -f '[r]ealtime_profile'\""
 }
 
 /// Ensure daemon is running as root. If a non-root daemon exists, restart it.
@@ -358,4 +366,18 @@ pub async fn get_grpc_port(serial: &str) -> Option<u16> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{daemon_pkill_command, daemon_su_pkill_command};
+
+    #[test]
+    fn daemon_kill_commands_use_self_safe_process_pattern() {
+        assert_eq!(daemon_pkill_command(), "pkill -f '[r]ealtime_profile'");
+        assert_eq!(
+            daemon_su_pkill_command(),
+            "su -c \"pkill -f '[r]ealtime_profile'\""
+        );
+    }
 }
