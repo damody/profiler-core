@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 mprofiler-proto = { path = "../mprofiler-proto" }
@@ -24,8 +24,10 @@ tokio-util = "0.7"
 libloading = "0.8"
 umya-spreadsheet = "2"
 thiserror = "2"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel"] }
 apache-avro = "0.17"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel"] }
 
 [profile.release]
 lto = true

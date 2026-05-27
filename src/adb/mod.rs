@@ -7,13 +7,18 @@ use tokio::process::Command;
 /// 建立已設定平台旗標的 adb Command。
 /// Windows 上設定 CREATE_NO_WINDOW 避免 CMD 視窗閃爍。
 pub(crate) fn adb_command() -> Command {
-    let mut cmd = Command::new("adb");
     #[cfg(windows)]
     {
+        let mut cmd = Command::new("adb");
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd
     }
-    cmd
+
+    #[cfg(not(windows))]
+    {
+        Command::new("adb")
+    }
 }
 
 /// Information about a single ADB device.

@@ -1,7 +1,9 @@
 pub mod adb;
+pub mod core_api;
 pub mod daq;
 pub mod ffi;
 pub mod grpc;
+pub mod local_linux_record;
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -22,6 +24,7 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
 /// OnceLock<Mutex<>> is consistent with the rest of our global state).
 static LAST_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
 static PANIC_HOOK_INIT: Once = Once::new();
+#[cfg(target_os = "windows")]
 static SEH_HOOK_INIT: Once = Once::new();
 static CRASH_LOG_RESET_INIT: Once = Once::new();
 

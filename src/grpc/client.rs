@@ -19,6 +19,7 @@ pub struct ProfilerClient {
 }
 
 /// Perfetto status returned by get_perfetto_status.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PerfettoStatusInfo {
     pub state: i32,
     pub progress_pct: f64,
@@ -26,6 +27,7 @@ pub struct PerfettoStatusInfo {
 }
 
 /// Top app info returned by get_top_app.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopAppInfo {
     pub package_name: String,
     pub activity: String,
@@ -33,6 +35,7 @@ pub struct TopAppInfo {
 }
 
 /// Package info returned by gRPC.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageInfoResult {
     pub package_name: String,
     pub apk_path: String,
@@ -43,6 +46,7 @@ pub struct PackageInfoResult {
 }
 
 /// Shell command result.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellResult {
     pub exit_code: i32,
     pub stdout: String,
@@ -50,6 +54,7 @@ pub struct ShellResult {
 }
 
 /// Generic response from the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenericResult {
     pub success: bool,
     pub message: String,
