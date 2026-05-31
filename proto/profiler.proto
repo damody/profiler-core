@@ -251,6 +251,10 @@ message DevicePropResponse {
   string value = 1;
 }
 
+message SetDeviceIdRequest {
+  string device_id = 1;
+}
+
 message PathExistsRequest {
   string path = 1;
 }
@@ -373,6 +377,7 @@ service ProfilerService {
 
   // Device Utilities
   rpc GetDeviceProp(DevicePropRequest) returns (DevicePropResponse);
+  rpc SetDeviceId(SetDeviceIdRequest) returns (GenericResponse);
   rpc PathExists(PathExistsRequest) returns (PathExistsResponse);
 
   // Temperature
