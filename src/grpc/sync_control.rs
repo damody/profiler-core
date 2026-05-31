@@ -13,8 +13,8 @@ use crate::proto::{
     InstallApkRequest, ListPackagesRequest, PackageInfo, PackageList, PackageRequest,
     PathExistsRequest, PathExistsResponse, PerfettoRequest, PerfettoResponse, PerfettoStatus,
     PullFileRequest, PushFileResponse, RemoveFileRequest, RtbSummary, RtbSummaryRequest,
-    ScreenSizeResponse, ScreenshotRequest, SetChargingRequest, ShellRequest, ShellResponse,
-    StopRecordingRequest, StopResponse, TemperatureResponse, TopAppInfo,
+    ScreenSizeResponse, ScreenshotRequest, SetChargingRequest, SetDeviceIdRequest, ShellRequest,
+    ShellResponse, StopRecordingRequest, StopResponse, TemperatureResponse, TopAppInfo,
 };
 
 const SYNC_CMD_HEALTH: u8 = 2;
@@ -53,6 +53,7 @@ const SYNC_CMD_PULL_FILE: u8 = 34;
 const SYNC_CMD_PUSH_FILE: u8 = 35;
 const SYNC_CMD_START_PERFETTO: u8 = 36;
 const SYNC_CMD_GET_PERFETTO_STATUS: u8 = 37;
+const SYNC_CMD_SET_DEVICE_ID: u8 = 42;
 
 pub fn health(addr: &str) -> anyhow::Result<(String, String)> {
     let response: HealthResponse = send_unary(addr, SYNC_CMD_HEALTH, &Empty {})?;
@@ -234,6 +235,16 @@ pub fn get_temperature(addr: &str) -> anyhow::Result<TemperatureResponse> {
 
 pub fn set_charging(addr: &str, enable: bool) -> anyhow::Result<GenericResponse> {
     send_unary(addr, SYNC_CMD_SET_CHARGING, &SetChargingRequest { enable })
+}
+
+pub fn set_device_id(addr: &str, device_id: &str) -> anyhow::Result<GenericResponse> {
+    send_unary(
+        addr,
+        SYNC_CMD_SET_DEVICE_ID,
+        &SetDeviceIdRequest {
+            device_id: device_id.to_string(),
+        },
+    )
 }
 
 pub fn remove_file(addr: &str, path: &str) -> anyhow::Result<GenericResponse> {

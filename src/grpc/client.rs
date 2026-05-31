@@ -10,7 +10,8 @@ use crate::proto::{
     InputKeyEventRequest, InputSwipeRequest, InputTapRequest, InputTextRequest, InstallApkRequest,
     ListPackagesRequest, PackageRequest, PathExistsRequest, PerfettoRequest, PerfettoResponse,
     PullFileRequest, RemoveFileRequest, RtbStreamRequest, RtbSummaryRequest, ScreenshotRequest,
-    SetChargingRequest, ShellRequest, StopRecordingRequest, StopResponse, TcStreamRequest,
+    SetChargingRequest, SetDeviceIdRequest, ShellRequest, StopRecordingRequest, StopResponse,
+    TcStreamRequest,
 };
 
 /// High-level wrapper around the gRPC ProfilerServiceClient.
@@ -738,6 +739,23 @@ impl ProfilerClient {
             .into_inner();
 
         Ok(resp.value)
+    }
+
+    /// Set the MTK device ID stored in the sysenv partition.
+    pub async fn set_device_id(&mut self, device_id: &str) -> Result<GenericResult> {
+        let resp = self
+            .inner
+            .set_device_id(SetDeviceIdRequest {
+                device_id: device_id.to_string(),
+            })
+            .await
+            .context("SetDeviceId RPC failed")?
+            .into_inner();
+
+        Ok(GenericResult {
+            success: resp.success,
+            message: resp.message,
+        })
     }
 
     /// Check if a path exists on the device.

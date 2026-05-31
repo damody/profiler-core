@@ -2251,6 +2251,53 @@ pub extern "C" fn profiler_get_device_prop(
     })
 }
 
+/// Set the MTK device ID stored in the device sysenv partition.
+#[no_mangle]
+pub extern "C" fn profiler_set_device_id(
+    serial: *const u16,
+    device_id: *const u16,
+) -> ProfilerResult {
+    if device_id.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let device_id_str = unsafe { from_wide_ptr(device_id) };
+
+    with_connection!(serial, |rt, entry| {
+        if let Some(addr) = sync_control_addr(entry) {
+            match grpc::sync_control::set_device_id(&addr, &device_id_str) {
+                Ok(resp) => {
+                    if resp.success {
+                        return ProfilerResult::Ok;
+                    }
+                    crate::set_last_error(resp.message.clone());
+                    log::error!("profiler_set_device_id: {}", resp.message);
+                    return ProfilerResult::OperationFailed;
+                }
+                Err(e) => log::warn!(
+                    "profiler_set_device_id: sync control failed, falling back to gRPC: {e:#}"
+                ),
+            }
+        }
+
+        match rt.block_on(entry.client.set_device_id(&device_id_str)) {
+            Ok(resp) => {
+                if resp.success {
+                    ProfilerResult::Ok
+                } else {
+                    crate::set_last_error(resp.message.clone());
+                    log::error!("profiler_set_device_id: {}", resp.message);
+                    ProfilerResult::OperationFailed
+                }
+            }
+            Err(e) => {
+                crate::set_last_error(format!("SetDeviceId RPC failed: {e:#}"));
+                log::error!("profiler_set_device_id: {e:#}");
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
 /// Check if a path exists on the device.
 #[no_mangle]
 pub extern "C" fn profiler_path_exists(

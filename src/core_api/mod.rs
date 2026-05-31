@@ -336,6 +336,18 @@ impl CoreApi {
             .map_err(CoreError::from_anyhow)
     }
 
+    pub async fn set_device_id(serial: &str, device_id: &str) -> CoreResult<GenericResult> {
+        validate_non_empty("serial", serial)?;
+        validate_non_empty("device id", device_id)?;
+        let mut conns = connected_clients();
+        let entry = connected_entry(&mut conns, serial)?;
+        entry
+            .client
+            .set_device_id(device_id)
+            .await
+            .map_err(CoreError::from_anyhow)
+    }
+
     pub async fn screen_size(serial: &str) -> CoreResult<(i32, i32)> {
         validate_non_empty("serial", serial)?;
         let mut conns = connected_clients();
