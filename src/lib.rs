@@ -95,6 +95,7 @@ pub fn grpc_compression_enabled() -> bool {
 }
 
 /// An active connection to a device's realtime_profile daemon.
+#[derive(Clone)]
 pub struct ConnectionEntry {
     pub serial: String,
     pub client: ProfilerClient,
@@ -104,9 +105,11 @@ pub struct ConnectionEntry {
 
 /// Initialize the global tokio runtime. Returns true if it was freshly created.
 pub fn init_runtime() -> bool {
-    let created = RUNTIME
-        .set(Runtime::new().expect("Failed to create tokio runtime"))
-        .is_ok();
+    let mut created = false;
+    let _ = RUNTIME.get_or_init(|| {
+        created = true;
+        Runtime::new().expect("Failed to create tokio runtime")
+    });
 
     // Also initialise the other global maps
     let _ = CONNECTIONS.set(Mutex::new(HashMap::new()));

@@ -250,10 +250,8 @@ impl CoreApi {
     pub async fn get_pid(serial: &str, package_name: &str) -> CoreResult<i32> {
         validate_non_empty("serial", serial)?;
         validate_non_empty("package name", package_name)?;
-        let mut conns = connected_clients();
-        let entry = connected_entry(&mut conns, serial)?;
-        entry
-            .client
+        let mut client = connected_client(serial)?;
+        client
             .get_pid(package_name)
             .await
             .map_err(CoreError::from_anyhow)
@@ -327,13 +325,8 @@ impl CoreApi {
     pub async fn daemon_shell(serial: &str, command: &str) -> CoreResult<ShellResult> {
         validate_non_empty("serial", serial)?;
         validate_non_empty("command", command)?;
-        let mut conns = connected_clients();
-        let entry = connected_entry(&mut conns, serial)?;
-        entry
-            .client
-            .shell(command)
-            .await
-            .map_err(CoreError::from_anyhow)
+        let mut client = connected_client(serial)?;
+        client.shell(command).await.map_err(CoreError::from_anyhow)
     }
 
     pub async fn set_device_id(serial: &str, device_id: &str) -> CoreResult<GenericResult> {
@@ -362,10 +355,8 @@ impl CoreApi {
     pub async fn screenshot(serial: &str, quality: i32, local_path: &str) -> CoreResult<()> {
         validate_non_empty("serial", serial)?;
         validate_non_empty("local path", local_path)?;
-        let mut conns = connected_clients();
-        let entry = connected_entry(&mut conns, serial)?;
-        entry
-            .client
+        let mut client = connected_client(serial)?;
+        client
             .screenshot(quality, local_path, |_current, _total| {})
             .await
             .map_err(CoreError::from_anyhow)
@@ -438,10 +429,8 @@ impl CoreApi {
     pub async fn path_exists(serial: &str, path: &str) -> CoreResult<bool> {
         validate_non_empty("serial", serial)?;
         validate_non_empty("path", path)?;
-        let mut conns = connected_clients();
-        let entry = connected_entry(&mut conns, serial)?;
-        entry
-            .client
+        let mut client = connected_client(serial)?;
+        client
             .path_exists(path)
             .await
             .map_err(CoreError::from_anyhow)
@@ -460,10 +449,8 @@ impl CoreApi {
 
     pub async fn set_charging(serial: &str, enable: bool) -> CoreResult<GenericResult> {
         validate_non_empty("serial", serial)?;
-        let mut conns = connected_clients();
-        let entry = connected_entry(&mut conns, serial)?;
-        entry
-            .client
+        let mut client = connected_client(serial)?;
+        client
             .set_charging(enable)
             .await
             .map_err(CoreError::from_anyhow)
@@ -574,11 +561,8 @@ impl CoreApi {
     ) -> CoreResult<tonic::Streaming<crate::proto::RtbDataPoint>> {
         validate_non_empty("serial", serial)?;
         validate_positive_f64("interval_secs", interval_secs)?;
-        validate_non_empty("mode", mode)?;
-        let mut conns = connected_clients();
-        let entry = connected_entry(&mut conns, serial)?;
-        entry
-            .client
+        let mut client = connected_client(serial)?;
+        client
             .start_rtb_stream(pid, interval_secs, mode, options)
             .await
             .map_err(CoreError::from_anyhow)
@@ -722,10 +706,8 @@ impl CoreApi {
         session_type: &str,
     ) -> CoreResult<crate::proto::StopResponse> {
         validate_non_empty("serial", serial)?;
-        let mut conns = connected_clients();
-        let entry = connected_entry(&mut conns, serial)?;
-        entry
-            .client
+        let mut client = connected_client(serial)?;
+        client
             .stop_recording(session_type)
             .await
             .map_err(CoreError::from_anyhow)
@@ -733,10 +715,8 @@ impl CoreApi {
 
     pub async fn rtb_summary(serial: &str) -> CoreResult<crate::proto::RtbSummary> {
         validate_non_empty("serial", serial)?;
-        let mut conns = connected_clients();
-        let entry = connected_entry(&mut conns, serial)?;
-        entry
-            .client
+        let mut client = connected_client(serial)?;
+        client
             .get_rtb_summary()
             .await
             .map_err(CoreError::from_anyhow)
@@ -821,6 +801,12 @@ fn connected_clients(
 ) -> parking_lot::MutexGuard<'static, std::collections::HashMap<String, crate::ConnectionEntry>> {
     let _ = CoreApi::initialize();
     crate::connections().lock()
+}
+
+fn connected_client(serial: &str) -> CoreResult<crate::grpc::client::ProfilerClient> {
+    let mut conns = connected_clients();
+    let entry = connected_entry(&mut conns, serial)?;
+    Ok(entry.client.clone())
 }
 
 fn connected_entry<'a>(

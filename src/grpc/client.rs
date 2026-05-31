@@ -15,6 +15,7 @@ use crate::proto::{
 };
 
 /// High-level wrapper around the gRPC ProfilerServiceClient.
+#[derive(Clone)]
 pub struct ProfilerClient {
     inner: ProfilerServiceClient<Channel>,
 }

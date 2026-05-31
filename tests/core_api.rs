@@ -107,3 +107,21 @@ fn recording_operations_validate_required_inputs_before_daemon_access() {
         .expect_err("empty remote path must be rejected before daemon access");
     assert!(matches!(err, CoreError::InvalidInput(_)));
 }
+
+#[test]
+fn rtb_stream_allows_empty_legacy_full_mode() {
+    let _ = CoreApi::initialize().expect("runtime initialization should succeed");
+    let rt = profiler_core::runtime();
+
+    let err = rt
+        .block_on(CoreApi::start_rtb_stream(
+            "missing-device",
+            123,
+            1.0,
+            "",
+            Default::default(),
+        ))
+        .expect_err("missing device should fail after mode validation");
+
+    assert!(matches!(err, CoreError::DeviceNotFound(_)));
+}
