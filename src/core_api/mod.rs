@@ -181,16 +181,44 @@ impl CoreApi {
         crate::adb::commands::forward(serial, port, daemon_port)
             .await
             .map_err(CoreError::from_anyhow)?;
+        if daemon_low_overhead {
+            match (port.checked_add(1), daemon_port.checked_add(1)) {
+                (Some(local_sync_port), Some(device_sync_port)) => {
+                    crate::adb::commands::forward(serial, local_sync_port, device_sync_port)
+                        .await
+                        .map_err(CoreError::from_anyhow)?;
+                }
+                _ => {
+                    return Err(CoreError::InvalidInput(
+                        "sync control port overflow".to_string(),
+                    ))
+                }
+            }
+        }
 
         let addr = format!("http://127.0.0.1:{port}");
-        let client = if daemon_low_overhead {
-            crate::grpc::client::ProfilerClient::connect_lazy(&addr)
-                .map_err(CoreError::from_anyhow)?
-        } else {
-            crate::grpc::client::ProfilerClient::connect(&addr)
-                .await
-                .map_err(CoreError::from_anyhow)?
-        };
+        if daemon_low_overhead {
+            if let Some(sync_addr) = sync_control_addr_for_port(port) {
+                if crate::grpc::sync_control::health(&sync_addr).is_ok() {
+                    let client = crate::grpc::client::ProfilerClient::connect_lazy(&addr)
+                        .map_err(CoreError::from_anyhow)?;
+                    let entry = crate::ConnectionEntry {
+                        serial: serial.to_string(),
+                        client,
+                        port,
+                        daemon_low_overhead,
+                    };
+                    crate::connections()
+                        .lock()
+                        .insert(serial.to_string(), entry);
+                    return Ok(());
+                }
+            }
+        }
+
+        let client = crate::grpc::client::ProfilerClient::connect(&addr)
+            .await
+            .map_err(|err| CoreError::DaemonNotRunning(err.to_string()))?;
 
         let entry = crate::ConnectionEntry {
             serial: serial.to_string(),
@@ -223,13 +251,23 @@ impl CoreApi {
     pub async fn health_check(serial: &str) -> CoreResult<HealthInfo> {
         validate_non_empty("serial", serial)?;
         Self::initialize()?;
-        let mut conns = crate::connections().lock();
-        let entry = conns
-            .get_mut(serial)
-            .ok_or_else(|| CoreError::DeviceNotFound(serial.to_string()))?;
+        let (mut client, port, daemon_low_overhead) = {
+            let conns = crate::connections().lock();
+            let entry = conns
+                .get(serial)
+                .ok_or_else(|| CoreError::DeviceNotFound(serial.to_string()))?;
+            (entry.client.clone(), entry.port, entry.daemon_low_overhead)
+        };
 
-        let (version, status) = entry
-            .client
+        if daemon_low_overhead {
+            if let Some(sync_addr) = sync_control_addr_for_port(port) {
+                if let Ok((version, status)) = crate::grpc::sync_control::health(&sync_addr) {
+                    return Ok(HealthInfo { version, status });
+                }
+            }
+        }
+
+        let (version, status) = client
             .health()
             .await
             .map_err(|err| CoreError::DaemonNotRunning(err.to_string()))?;
@@ -816,6 +854,10 @@ fn connected_entry<'a>(
     conns
         .get_mut(serial)
         .ok_or_else(|| CoreError::DeviceNotFound(serial.to_string()))
+}
+
+fn sync_control_addr_for_port(port: u16) -> Option<String> {
+    port.checked_add(1).map(|port| format!("127.0.0.1:{port}"))
 }
 
 fn validate_non_empty(field: &str, value: &str) -> CoreResult<()> {
