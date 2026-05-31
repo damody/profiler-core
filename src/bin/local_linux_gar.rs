@@ -46,7 +46,9 @@ fn next_value(args: &mut impl Iterator<Item = String>, name: &str) -> anyhow::Re
 }
 
 fn print_help() {
-    println!("Usage: local_linux_gar --csv record.csv [--threads record.threads.csv] [--out GAR.xlsx]");
+    println!(
+        "Usage: local_linux_gar --csv record.csv [--threads record.threads.csv] [--out GAR.xlsx]"
+    );
 }
 
 fn default_threads_path(csv: &str) -> String {

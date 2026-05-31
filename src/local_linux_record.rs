@@ -167,7 +167,10 @@ pub fn parse_thread_summary_csv(path: impl AsRef<Path>) -> anyhow::Result<Vec<Li
         }
         let fields = parse_csv_line(line);
         if fields.len() != 11 {
-            anyhow::bail!("invalid thread csv row {}: expected 11 fields", line_index + 1);
+            anyhow::bail!(
+                "invalid thread csv row {}: expected 11 fields",
+                line_index + 1
+            );
         }
         threads.push(LinuxThreadSummary {
             pid: fields[0].parse()?,
@@ -318,7 +321,11 @@ fn write_advanced_report_sheet(
         ("performance/power", "Avg FPS", Some("0.00".into())),
         ("", "Avg Power (mA)", Some("0.00".into())),
         ("", "1% Low", Some("0.00".into())),
-        ("MIPS", "Total MIPS", Some(format!("{:.0}", avg_mips(samples)))),
+        (
+            "MIPS",
+            "Total MIPS",
+            Some(format!("{:.0}", avg_mips(samples))),
+        ),
         ("", "Game MIPS", Some(format!("{:.0}", avg_mips(samples)))),
         ("", "- Logical MIPS", None),
         ("", "- Render MIPS", None),
@@ -326,25 +333,53 @@ fn write_advanced_report_sheet(
         ("BW", "Total EMI Thr. (MB/s)", None),
         ("", "CPU EMI Thr. (MB/s)", None),
         ("", "GPU EMI Thr. (MB/s)", None),
-        ("Game Task Info", "Logical Thread CPU Usage (BCPU/MCPU)", None),
+        (
+            "Game Task Info",
+            "Logical Thread CPU Usage (BCPU/MCPU)",
+            None,
+        ),
         ("", "Logical Loading", None),
         ("", "Logical CPI", None),
         ("", "Render Thread CPU Usage (BCPU/MCPU)", None),
         ("", "Render Loading", None),
         ("", "Render CPI", None),
         ("System Indices", "Avg. BCPU Freq. (MHz)", Some("0".into())),
-        ("", "Avg. BCPU Usage (%)", Some(format!("{:.1}%", avg_cpu(samples)))),
+        (
+            "",
+            "Avg. BCPU Usage (%)",
+            Some(format!("{:.1}%", avg_cpu(samples))),
+        ),
         ("", "Avg. MCPU Freq. (MHz)", Some("0".into())),
-        ("", "Avg. MCPU Usage (%)", Some(format!("{:.1}%", avg_cpu(samples)))),
+        (
+            "",
+            "Avg. MCPU Usage (%)",
+            Some(format!("{:.1}%", avg_cpu(samples))),
+        ),
         ("", "Avg. LCPU Freq. (MHz)", Some("0".into())),
-        ("", "Avg. LCPU Usage (%)", Some(format!("{:.1}%", avg_cpu(samples)))),
+        (
+            "",
+            "Avg. LCPU Usage (%)",
+            Some(format!("{:.1}%", avg_cpu(samples))),
+        ),
         ("", "Avg. GPU Freq. (MHz)", Some("0".into())),
         ("", "GPU urate", Some("0.0%".into())),
         ("", "Avg. DSU Freq. (MHz)", Some("0".into())),
         ("", "Avg. DRAM Freq. (MHz)", Some("0".into())),
-        ("", "Linux PMU CPI", Some(format!("{:.2}", avg_cpi(samples)))),
-        ("", "Linux PMU Cache Miss Rate", Some(format!("{:.2}%", avg_cache_miss_rate(samples)))),
-        ("", "Linux PMU Branch Miss Rate", Some(format!("{:.2}%", avg_branch_miss_rate(samples)))),
+        (
+            "",
+            "Linux PMU CPI",
+            Some(format!("{:.2}", avg_cpi(samples))),
+        ),
+        (
+            "",
+            "Linux PMU Cache Miss Rate",
+            Some(format!("{:.2}%", avg_cache_miss_rate(samples))),
+        ),
+        (
+            "",
+            "Linux PMU Branch Miss Rate",
+            Some(format!("{:.2}%", avg_branch_miss_rate(samples))),
+        ),
         ("Temperature", "Board Temp Avg (C)", Some("0.0".into())),
         ("", "Battery Temp Avg (C)", Some("0.0".into())),
         ("", "Start Temp (C)", Some("0.0".into())),
@@ -497,7 +532,12 @@ fn write_raw_data_sheet(
     for (index, sample) in samples.iter().enumerate() {
         let row = (index + 2) as u32;
         set_number(ws, row, 1, sample.timestamp_ms as f64);
-        set_number(ws, row, 2, sample.timestamp_ms.saturating_sub(start) as f64 / 1000.0);
+        set_number(
+            ws,
+            row,
+            2,
+            sample.timestamp_ms.saturating_sub(start) as f64 / 1000.0,
+        );
         for col in 3..=5 {
             set_number(ws, row, col, 0.0);
         }
@@ -541,7 +581,9 @@ fn set_text(ws: &mut umya_spreadsheet::Worksheet, row: u32, col: u32, value: &st
 }
 
 fn add_sheet(book: &mut umya_spreadsheet::Spreadsheet, name: &str) -> anyhow::Result<()> {
-    book.new_sheet(name).map(|_| ()).map_err(|err| anyhow::anyhow!(err))
+    book.new_sheet(name)
+        .map(|_| ())
+        .map_err(|err| anyhow::anyhow!(err))
 }
 
 fn set_number(ws: &mut umya_spreadsheet::Worksheet, row: u32, col: u32, value: f64) {
