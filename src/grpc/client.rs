@@ -10,7 +10,10 @@ use crate::proto::{
     InputKeyEventRequest, InputSwipeRequest, InputTapRequest, InputTextRequest, InstallApkRequest,
     ListPackagesRequest, PackageRequest, PathExistsRequest, PerfettoRequest, PerfettoResponse,
     PullFileRequest, RemoveFileRequest, RtbStreamRequest, RtbSummaryRequest, ScreenshotRequest,
-    SetChargingRequest, SetDeviceIdRequest, ShellRequest, StopRecordingRequest, StopResponse,
+    SetChargingRequest, SetDeviceIdRequest, ShellRequest, SourceCpuSelection, SourcePathRemap,
+    SourceProfileCapabilityRequest, SourceProfileCapabilityResponse, SourceProfileStartRequest,
+    SourceProfileStartResponse, SourceProfileStatusRequest, SourceProfileStatusResponse,
+    SourceProfileStopRequest, SourceProfileStopResponse, StopRecordingRequest, StopResponse,
     TcStreamRequest,
 };
 
@@ -98,6 +101,105 @@ impl Default for RtbStreamOptions {
             enable_total_mips: true,
             enable_thread_mips: true,
             warmup_secs: 0.0,
+        }
+    }
+}
+
+/// CPU selection used by source profile capture.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceCpuSelectionOptions {
+    pub all_cpus: bool,
+    pub cpus: Vec<u32>,
+    pub clusters: Vec<String>,
+}
+
+impl SourceCpuSelectionOptions {
+    fn to_proto(&self) -> SourceCpuSelection {
+        SourceCpuSelection {
+            all_cpus: self.all_cpus,
+            cpus: self.cpus.clone(),
+            clusters: self.clusters.clone(),
+        }
+    }
+}
+
+/// Path remap hint used later by report generation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourcePathRemapOption {
+    pub from: String,
+    pub to: String,
+}
+
+/// Source capability scan options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceProfileCapabilityOptions {
+    pub package_name: String,
+    pub pid: u32,
+    pub cpu_selection: SourceCpuSelectionOptions,
+    pub enable_pmu: bool,
+    pub enable_spe: bool,
+    pub requested_metric_groups: Vec<String>,
+}
+
+impl Default for SourceProfileCapabilityOptions {
+    fn default() -> Self {
+        Self {
+            package_name: String::new(),
+            pid: 0,
+            cpu_selection: SourceCpuSelectionOptions {
+                all_cpus: true,
+                ..Default::default()
+            },
+            enable_pmu: true,
+            enable_spe: true,
+            requested_metric_groups: Vec::new(),
+        }
+    }
+}
+
+/// Source profile start options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceProfileStartOptions {
+    pub package_name: String,
+    pub pid: u32,
+    pub cpu_selection: SourceCpuSelectionOptions,
+    pub enable_pmu: bool,
+    pub enable_spe: bool,
+    pub duration_ms: u64,
+    pub pmu_buffer_pages: u32,
+    pub spe_aux_buffer_bytes: u64,
+    pub spe_ring_buffer_pages: u32,
+    pub sample_period: u64,
+    pub callchain_depth: u32,
+    pub output_remote_root: String,
+    pub requested_event_keys: Vec<String>,
+    pub debug_elf_hints: Vec<String>,
+    pub source_root_hints: Vec<String>,
+    pub path_remaps: Vec<SourcePathRemapOption>,
+}
+
+impl Default for SourceProfileStartOptions {
+    fn default() -> Self {
+        Self {
+            package_name: String::new(),
+            pid: 0,
+            cpu_selection: SourceCpuSelectionOptions {
+                all_cpus: true,
+                ..Default::default()
+            },
+            enable_pmu: true,
+            enable_spe: true,
+            duration_ms: 60_000,
+            pmu_buffer_pages: 8_192,
+            spe_aux_buffer_bytes: 64 * 1024 * 1024,
+            spe_ring_buffer_pages: 256,
+            sample_period: 1_000,
+            callchain_depth: 16,
+            output_remote_root: "/data/local/tmp/mprofiler/source_profile".to_string(),
+            requested_event_keys: Vec::new(),
+            debug_elf_hints: Vec::new(),
+            source_root_hints: Vec::new(),
+            path_remaps: Vec::new(),
         }
     }
 }
@@ -320,6 +422,99 @@ impl ProfilerClient {
         })
     }
 
+    /// Scan source-profile PMU/SPE capabilities on the device.
+    pub async fn source_profile_capability(
+        &mut self,
+        options: SourceProfileCapabilityOptions,
+    ) -> Result<SourceProfileCapabilityResponse> {
+        let resp = self
+            .inner
+            .source_profile_capability(SourceProfileCapabilityRequest {
+                package_name: options.package_name,
+                pid: options.pid,
+                cpu_selection: Some(options.cpu_selection.to_proto()),
+                enable_pmu: options.enable_pmu,
+                enable_spe: options.enable_spe,
+                requested_metric_groups: options.requested_metric_groups,
+            })
+            .await
+            .context("SourceProfileCapability RPC failed")?
+            .into_inner();
+        Ok(resp)
+    }
+
+    /// Start source-profile capture on the daemon.
+    pub async fn source_profile_start(
+        &mut self,
+        options: SourceProfileStartOptions,
+    ) -> Result<SourceProfileStartResponse> {
+        let resp = self
+            .inner
+            .source_profile_start(SourceProfileStartRequest {
+                package_name: options.package_name,
+                pid: options.pid,
+                cpu_selection: Some(options.cpu_selection.to_proto()),
+                enable_pmu: options.enable_pmu,
+                enable_spe: options.enable_spe,
+                duration_ms: options.duration_ms,
+                pmu_buffer_pages: options.pmu_buffer_pages,
+                spe_aux_buffer_bytes: options.spe_aux_buffer_bytes,
+                spe_ring_buffer_pages: options.spe_ring_buffer_pages,
+                sample_period: options.sample_period,
+                callchain_depth: options.callchain_depth,
+                output_remote_root: options.output_remote_root,
+                requested_event_keys: options.requested_event_keys,
+                debug_elf_hints: options.debug_elf_hints,
+                source_root_hints: options.source_root_hints,
+                path_remaps: options
+                    .path_remaps
+                    .into_iter()
+                    .map(|remap| SourcePathRemap {
+                        from: remap.from,
+                        to: remap.to,
+                    })
+                    .collect(),
+            })
+            .await
+            .context("SourceProfileStart RPC failed")?
+            .into_inner();
+        Ok(resp)
+    }
+
+    /// Query source-profile capture status.
+    pub async fn source_profile_status(
+        &mut self,
+        session_id: &str,
+    ) -> Result<SourceProfileStatusResponse> {
+        let resp = self
+            .inner
+            .source_profile_status(SourceProfileStatusRequest {
+                session_id: session_id.to_string(),
+            })
+            .await
+            .context("SourceProfileStatus RPC failed")?
+            .into_inner();
+        Ok(resp)
+    }
+
+    /// Stop source-profile capture and request bundle finalization.
+    pub async fn source_profile_stop(
+        &mut self,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<SourceProfileStopResponse> {
+        let resp = self
+            .inner
+            .source_profile_stop(SourceProfileStopRequest {
+                session_id: session_id.to_string(),
+                reason: reason.to_string(),
+            })
+            .await
+            .context("SourceProfileStop RPC failed")?
+            .into_inner();
+        Ok(resp)
+    }
+
     /// Pull a file from the device, writing to a local path.
     pub async fn pull_file<F>(
         &mut self,
@@ -364,6 +559,35 @@ impl ProfilerClient {
             local_path
         );
         Ok(())
+    }
+
+    /// Archive a source-profile bundle directory on-device and pull it locally.
+    pub async fn pull_source_bundle<F>(
+        &mut self,
+        remote_bundle_path: &str,
+        local_archive_path: &str,
+        progress_cb: F,
+    ) -> Result<String>
+    where
+        F: Fn(u64, u64),
+    {
+        let trimmed = remote_bundle_path.trim_end_matches('/');
+        let (working_directory, target) = trimmed
+            .rsplit_once('/')
+            .ok_or_else(|| anyhow::anyhow!("invalid remote bundle path: {remote_bundle_path}"))?;
+        let archive_path = format!("{trimmed}.tar.gz");
+        let archive = self
+            .create_archive(working_directory, target, &archive_path)
+            .await?;
+        if !archive.success {
+            anyhow::bail!(
+                "CreateArchive failed for source profile bundle: {}",
+                archive.message
+            );
+        }
+        self.pull_file(&archive_path, local_archive_path, progress_cb)
+            .await?;
+        Ok(archive_path)
     }
 
     /// Stop recording on the daemon.

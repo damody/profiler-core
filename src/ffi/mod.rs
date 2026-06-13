@@ -1153,6 +1153,485 @@ pub extern "C" fn profiler_stop_recording(
 }
 
 // ---------------------------------------------------------------------------
+// Source Profile
+// ---------------------------------------------------------------------------
+
+unsafe fn read_wide_ptr_array(ptr: *const *const u16, count: usize) -> Vec<String> {
+    if ptr.is_null() || count == 0 {
+        return Vec::new();
+    }
+    std::slice::from_raw_parts(ptr, count)
+        .iter()
+        .filter_map(|item| {
+            if item.is_null() {
+                None
+            } else {
+                let value = from_wide_ptr(*item);
+                (!value.is_empty()).then_some(value)
+            }
+        })
+        .collect()
+}
+
+unsafe fn source_cpu_selection_from_ffi(
+    selection: &ProfilerSourceCpuSelection,
+) -> grpc::client::SourceCpuSelectionOptions {
+    let cpus = if selection.cpus.is_null() || selection.cpus_count == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(selection.cpus, selection.cpus_count).to_vec()
+    };
+    grpc::client::SourceCpuSelectionOptions {
+        all_cpus: selection.all_cpus,
+        cpus,
+        clusters: read_wide_ptr_array(selection.clusters, selection.clusters_count),
+    }
+}
+
+unsafe fn source_capability_options_from_ffi(
+    options: &ProfilerSourceCapabilityOptions,
+) -> grpc::client::SourceProfileCapabilityOptions {
+    grpc::client::SourceProfileCapabilityOptions {
+        package_name: from_wide_ptr(options.package_name),
+        pid: options.pid,
+        cpu_selection: source_cpu_selection_from_ffi(&options.cpu_selection),
+        enable_pmu: options.enable_pmu,
+        enable_spe: options.enable_spe,
+        requested_metric_groups: read_wide_ptr_array(
+            options.requested_metric_groups,
+            options.requested_metric_groups_count,
+        ),
+    }
+}
+
+unsafe fn source_start_options_from_ffi(
+    options: &ProfilerSourceStartOptions,
+) -> grpc::client::SourceProfileStartOptions {
+    let path_remaps = if options.path_remaps.is_null() || options.path_remaps_count == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(options.path_remaps, options.path_remaps_count)
+            .iter()
+            .map(|remap| grpc::client::SourcePathRemapOption {
+                from: from_wide_ptr(remap.from),
+                to: from_wide_ptr(remap.to),
+            })
+            .collect()
+    };
+    grpc::client::SourceProfileStartOptions {
+        package_name: from_wide_ptr(options.package_name),
+        pid: options.pid,
+        cpu_selection: source_cpu_selection_from_ffi(&options.cpu_selection),
+        enable_pmu: options.enable_pmu,
+        enable_spe: options.enable_spe,
+        duration_ms: options.duration_ms,
+        pmu_buffer_pages: options.pmu_buffer_pages,
+        spe_aux_buffer_bytes: options.spe_aux_buffer_bytes,
+        spe_ring_buffer_pages: options.spe_ring_buffer_pages,
+        sample_period: options.sample_period,
+        callchain_depth: options.callchain_depth,
+        output_remote_root: from_wide_ptr(options.output_remote_root),
+        requested_event_keys: read_wide_ptr_array(
+            options.requested_event_keys,
+            options.requested_event_keys_count,
+        ),
+        debug_elf_hints: read_wide_ptr_array(
+            options.debug_elf_hints,
+            options.debug_elf_hints_count,
+        ),
+        source_root_hints: read_wide_ptr_array(
+            options.source_root_hints,
+            options.source_root_hints_count,
+        ),
+        path_remaps,
+    }
+}
+
+fn wide_string_array(values: &[String]) -> (*mut *mut u16, usize) {
+    if values.is_empty() {
+        return (ptr::null_mut(), 0);
+    }
+    let mut wide: Vec<*mut u16> = values.iter().map(|value| to_wide_ptr(value)).collect();
+    let count = wide.len();
+    let ptr = wide.as_mut_ptr();
+    std::mem::forget(wide);
+    (ptr, count)
+}
+
+unsafe fn free_wide_string_array(ptr: *mut *mut u16, count: usize) {
+    if ptr.is_null() || count == 0 {
+        return;
+    }
+    let values = Vec::from_raw_parts(ptr, count, count);
+    for value in values {
+        free_wide_ptr(value);
+    }
+}
+
+fn source_capability_to_ffi(
+    response: crate::proto::SourceProfileCapabilityResponse,
+    out: *mut ProfilerSourceCapabilityResult,
+) {
+    let mut rows: Vec<ProfilerSourceCpuCapabilityRow> = response
+        .cpus
+        .into_iter()
+        .map(|row| {
+            let mut details: Vec<ProfilerSourceCapabilityDetail> = row
+                .details
+                .into_iter()
+                .map(|detail| ProfilerSourceCapabilityDetail {
+                    event_key: to_wide_ptr(&detail.event_key),
+                    raw_event_name: to_wide_ptr(&detail.raw_event_name),
+                    event_source: to_wide_ptr(&detail.event_source),
+                    event_type: to_wide_ptr(&detail.event_type),
+                    config: to_wide_ptr(&detail.config),
+                    supported: detail.supported,
+                    errno: detail.errno,
+                    failure_reason: to_wide_ptr(&detail.failure_reason),
+                    kernel_path: to_wide_ptr(&detail.kernel_path),
+                    sysfs_path: to_wide_ptr(&detail.sysfs_path),
+                })
+                .collect();
+            let details_count = details.len();
+            let details_ptr = if details.is_empty() {
+                ptr::null_mut()
+            } else {
+                let ptr = details.as_mut_ptr();
+                std::mem::forget(details);
+                ptr
+            };
+            ProfilerSourceCpuCapabilityRow {
+                cpu: row.cpu,
+                cluster: to_wide_ptr(&row.cluster),
+                spe: row.spe,
+                cycles: row.cycles,
+                instructions: row.instructions,
+                cache: row.cache,
+                branch: row.branch,
+                callchain: row.callchain,
+                source_sample_fields: row.source_sample_fields,
+                details: details_ptr,
+                details_count,
+            }
+        })
+        .collect();
+    let cpus_count = rows.len();
+    let cpus = if rows.is_empty() {
+        ptr::null_mut()
+    } else {
+        let ptr = rows.as_mut_ptr();
+        std::mem::forget(rows);
+        ptr
+    };
+    let (warnings, warnings_count) = wide_string_array(&response.warnings);
+    unsafe {
+        (*out).cpus = cpus;
+        (*out).cpus_count = cpus_count;
+        (*out).capability_json = to_wide_ptr(&response.capability_json);
+        (*out).warnings = warnings;
+        (*out).warnings_count = warnings_count;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_source_profile_capability(
+    serial: *const u16,
+    options: *const ProfilerSourceCapabilityOptions,
+    out: *mut ProfilerSourceCapabilityResult,
+) -> ProfilerResult {
+    if serial.is_null() || options.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let options = unsafe { source_capability_options_from_ffi(&*options) };
+    let rt = crate::runtime();
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+    match rt.block_on(entry.client.source_profile_capability(options)) {
+        Ok(response) => {
+            source_capability_to_ffi(response, out);
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            let msg = format!("source profile capability failed: {e:#}");
+            log::error!("{msg}");
+            crate::set_last_error(msg);
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_free_source_capability_result(
+    result: *mut ProfilerSourceCapabilityResult,
+) {
+    if result.is_null() {
+        return;
+    }
+    unsafe {
+        let rows = (*result).cpus;
+        let rows_count = (*result).cpus_count;
+        if !rows.is_null() && rows_count > 0 {
+            let rows = Vec::from_raw_parts(rows, rows_count, rows_count);
+            for row in rows {
+                free_wide_ptr(row.cluster);
+                if !row.details.is_null() && row.details_count > 0 {
+                    let details =
+                        Vec::from_raw_parts(row.details, row.details_count, row.details_count);
+                    for detail in details {
+                        free_wide_ptr(detail.event_key);
+                        free_wide_ptr(detail.raw_event_name);
+                        free_wide_ptr(detail.event_source);
+                        free_wide_ptr(detail.event_type);
+                        free_wide_ptr(detail.config);
+                        free_wide_ptr(detail.failure_reason);
+                        free_wide_ptr(detail.kernel_path);
+                        free_wide_ptr(detail.sysfs_path);
+                    }
+                }
+            }
+        }
+        free_wide_ptr((*result).capability_json);
+        free_wide_string_array((*result).warnings, (*result).warnings_count);
+        (*result).cpus = ptr::null_mut();
+        (*result).cpus_count = 0;
+        (*result).capability_json = ptr::null_mut();
+        (*result).warnings = ptr::null_mut();
+        (*result).warnings_count = 0;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_source_profile_start(
+    serial: *const u16,
+    options: *const ProfilerSourceStartOptions,
+    out: *mut ProfilerSourceStartResult,
+) -> ProfilerResult {
+    if serial.is_null() || options.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let options = unsafe { source_start_options_from_ffi(&*options) };
+    let rt = crate::runtime();
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+    match rt.block_on(entry.client.source_profile_start(options)) {
+        Ok(response) => {
+            let (warnings, warnings_count) = wide_string_array(&response.warnings);
+            unsafe {
+                (*out).success = response.success;
+                (*out).session_id = to_wide_ptr(&response.session_id);
+                (*out).remote_bundle_path = to_wide_ptr(&response.remote_bundle_path);
+                (*out).accepted_settings_json = to_wide_ptr(&response.accepted_settings_json);
+                (*out).warnings = warnings;
+                (*out).warnings_count = warnings_count;
+                (*out).message = to_wide_ptr(&response.message);
+            }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            let msg = format!("source profile start failed: {e:#}");
+            log::error!("{msg}");
+            crate::set_last_error(msg);
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_free_source_start_result(result: *mut ProfilerSourceStartResult) {
+    if result.is_null() {
+        return;
+    }
+    unsafe {
+        free_wide_ptr((*result).session_id);
+        free_wide_ptr((*result).remote_bundle_path);
+        free_wide_ptr((*result).accepted_settings_json);
+        free_wide_string_array((*result).warnings, (*result).warnings_count);
+        free_wide_ptr((*result).message);
+        (*result).session_id = ptr::null_mut();
+        (*result).remote_bundle_path = ptr::null_mut();
+        (*result).accepted_settings_json = ptr::null_mut();
+        (*result).warnings = ptr::null_mut();
+        (*result).warnings_count = 0;
+        (*result).message = ptr::null_mut();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_source_profile_status(
+    serial: *const u16,
+    session_id: *const u16,
+    out: *mut ProfilerSourceStatusResult,
+) -> ProfilerResult {
+    if serial.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let session_id = unsafe { from_wide_ptr(session_id) };
+    let rt = crate::runtime();
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+    match rt.block_on(entry.client.source_profile_status(&session_id)) {
+        Ok(response) => {
+            unsafe {
+                (*out).state = response.state;
+                (*out).session_id = to_wide_ptr(&response.session_id);
+                (*out).elapsed_secs = response.elapsed_secs;
+                (*out).progress_pct = response.progress_pct;
+                (*out).sample_count = response.sample_count;
+                (*out).sample_weight_sum = response.sample_weight_sum;
+                (*out).lost_count = response.lost_count;
+                (*out).current_event_run = to_wide_ptr(&response.current_event_run);
+                (*out).last_warning = to_wide_ptr(&response.last_warning);
+                (*out).remote_bundle_path = to_wide_ptr(&response.remote_bundle_path);
+                (*out).message = to_wide_ptr(&response.message);
+            }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            let msg = format!("source profile status failed: {e:#}");
+            log::error!("{msg}");
+            crate::set_last_error(msg);
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_free_source_status_result(result: *mut ProfilerSourceStatusResult) {
+    if result.is_null() {
+        return;
+    }
+    unsafe {
+        free_wide_ptr((*result).session_id);
+        free_wide_ptr((*result).current_event_run);
+        free_wide_ptr((*result).last_warning);
+        free_wide_ptr((*result).remote_bundle_path);
+        free_wide_ptr((*result).message);
+        (*result).session_id = ptr::null_mut();
+        (*result).current_event_run = ptr::null_mut();
+        (*result).last_warning = ptr::null_mut();
+        (*result).remote_bundle_path = ptr::null_mut();
+        (*result).message = ptr::null_mut();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_source_profile_stop(
+    serial: *const u16,
+    session_id: *const u16,
+    reason: *const u16,
+    out: *mut ProfilerSourceStopResult,
+) -> ProfilerResult {
+    if serial.is_null() || out.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let session_id = unsafe { from_wide_ptr(session_id) };
+    let reason = unsafe { from_wide_ptr(reason) };
+    let rt = crate::runtime();
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+    match rt.block_on(entry.client.source_profile_stop(&session_id, &reason)) {
+        Ok(response) => {
+            let (warnings, warnings_count) = wide_string_array(&response.warnings);
+            unsafe {
+                (*out).success = response.success;
+                (*out).session_id = to_wide_ptr(&response.session_id);
+                (*out).remote_bundle_path = to_wide_ptr(&response.remote_bundle_path);
+                (*out).warnings = warnings;
+                (*out).warnings_count = warnings_count;
+                (*out).message = to_wide_ptr(&response.message);
+            }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            let msg = format!("source profile stop failed: {e:#}");
+            log::error!("{msg}");
+            crate::set_last_error(msg);
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_free_source_stop_result(result: *mut ProfilerSourceStopResult) {
+    if result.is_null() {
+        return;
+    }
+    unsafe {
+        free_wide_ptr((*result).session_id);
+        free_wide_ptr((*result).remote_bundle_path);
+        free_wide_string_array((*result).warnings, (*result).warnings_count);
+        free_wide_ptr((*result).message);
+        (*result).session_id = ptr::null_mut();
+        (*result).remote_bundle_path = ptr::null_mut();
+        (*result).warnings = ptr::null_mut();
+        (*result).warnings_count = 0;
+        (*result).message = ptr::null_mut();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_pull_source_bundle(
+    serial: *const u16,
+    remote_bundle_path: *const u16,
+    local_archive_path: *const u16,
+    out_remote_archive_path: *mut *mut u16,
+) -> ProfilerResult {
+    if serial.is_null()
+        || remote_bundle_path.is_null()
+        || local_archive_path.is_null()
+        || out_remote_archive_path.is_null()
+    {
+        return ProfilerResult::InvalidParameter;
+    }
+    let serial_str = unsafe { from_wide_ptr(serial) };
+    let remote_bundle_path = unsafe { from_wide_ptr(remote_bundle_path) };
+    let local_archive_path = unsafe { from_wide_ptr(local_archive_path) };
+    let rt = crate::runtime();
+    let mut conns = crate::connections().lock();
+    let entry = match conns.get_mut(&serial_str) {
+        Some(e) => e,
+        None => return ProfilerResult::DeviceNotFound,
+    };
+    match rt.block_on(entry.client.pull_source_bundle(
+        &remote_bundle_path,
+        &local_archive_path,
+        |_current, _total| {},
+    )) {
+        Ok(remote_archive_path) => {
+            unsafe {
+                *out_remote_archive_path = to_wide_ptr(&remote_archive_path);
+            }
+            ProfilerResult::Ok
+        }
+        Err(e) => {
+            let msg = format!("pull source bundle failed: {e:#}");
+            log::error!("{msg}");
+            crate::set_last_error(msg);
+            unsafe {
+                *out_remote_archive_path = ptr::null_mut();
+            }
+            ProfilerResult::OperationFailed
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Generic ADB shell (legacy — still calls adb.exe directly)
 // ---------------------------------------------------------------------------
 

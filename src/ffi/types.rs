@@ -128,6 +128,140 @@ pub struct ProfilerPerfettoStatus {
     pub output_path: *mut u16,
 }
 
+/// CPU selection for source profile operations.
+#[repr(C)]
+pub struct ProfilerSourceCpuSelection {
+    pub all_cpus: bool,
+    pub cpus: *const u32,
+    pub cpus_count: usize,
+    pub clusters: *const *const u16,
+    pub clusters_count: usize,
+}
+
+/// Source path remap option.
+#[repr(C)]
+pub struct ProfilerSourcePathRemap {
+    pub from: *const u16,
+    pub to: *const u16,
+}
+
+/// Source profile capability request options.
+#[repr(C)]
+pub struct ProfilerSourceCapabilityOptions {
+    pub package_name: *const u16,
+    pub pid: u32,
+    pub cpu_selection: ProfilerSourceCpuSelection,
+    pub enable_pmu: bool,
+    pub enable_spe: bool,
+    pub requested_metric_groups: *const *const u16,
+    pub requested_metric_groups_count: usize,
+}
+
+/// Source profile start request options.
+#[repr(C)]
+pub struct ProfilerSourceStartOptions {
+    pub package_name: *const u16,
+    pub pid: u32,
+    pub cpu_selection: ProfilerSourceCpuSelection,
+    pub enable_pmu: bool,
+    pub enable_spe: bool,
+    pub duration_ms: u64,
+    pub pmu_buffer_pages: u32,
+    pub spe_aux_buffer_bytes: u64,
+    pub spe_ring_buffer_pages: u32,
+    pub sample_period: u64,
+    pub callchain_depth: u32,
+    pub output_remote_root: *const u16,
+    pub requested_event_keys: *const *const u16,
+    pub requested_event_keys_count: usize,
+    pub debug_elf_hints: *const *const u16,
+    pub debug_elf_hints_count: usize,
+    pub source_root_hints: *const *const u16,
+    pub source_root_hints_count: usize,
+    pub path_remaps: *const ProfilerSourcePathRemap,
+    pub path_remaps_count: usize,
+}
+
+/// Capability detail row for one raw PMU/SPE capability probe.
+#[repr(C)]
+pub struct ProfilerSourceCapabilityDetail {
+    pub event_key: *mut u16,
+    pub raw_event_name: *mut u16,
+    pub event_source: *mut u16,
+    pub event_type: *mut u16,
+    pub config: *mut u16,
+    pub supported: bool,
+    pub errno: i32,
+    pub failure_reason: *mut u16,
+    pub kernel_path: *mut u16,
+    pub sysfs_path: *mut u16,
+}
+
+/// Per-CPU source profile capability summary.
+#[repr(C)]
+pub struct ProfilerSourceCpuCapabilityRow {
+    pub cpu: u32,
+    pub cluster: *mut u16,
+    pub spe: bool,
+    pub cycles: bool,
+    pub instructions: bool,
+    pub cache: bool,
+    pub branch: bool,
+    pub callchain: bool,
+    pub source_sample_fields: bool,
+    pub details: *mut ProfilerSourceCapabilityDetail,
+    pub details_count: usize,
+}
+
+/// Source profile capability result.
+#[repr(C)]
+pub struct ProfilerSourceCapabilityResult {
+    pub cpus: *mut ProfilerSourceCpuCapabilityRow,
+    pub cpus_count: usize,
+    pub capability_json: *mut u16,
+    pub warnings: *mut *mut u16,
+    pub warnings_count: usize,
+}
+
+/// Source profile start result.
+#[repr(C)]
+pub struct ProfilerSourceStartResult {
+    pub success: bool,
+    pub session_id: *mut u16,
+    pub remote_bundle_path: *mut u16,
+    pub accepted_settings_json: *mut u16,
+    pub warnings: *mut *mut u16,
+    pub warnings_count: usize,
+    pub message: *mut u16,
+}
+
+/// Source profile status result.
+#[repr(C)]
+pub struct ProfilerSourceStatusResult {
+    pub state: i32,
+    pub session_id: *mut u16,
+    pub elapsed_secs: f64,
+    pub progress_pct: f64,
+    pub sample_count: u64,
+    pub sample_weight_sum: u64,
+    pub lost_count: u64,
+    pub current_event_run: *mut u16,
+    pub last_warning: *mut u16,
+    pub remote_bundle_path: *mut u16,
+    pub message: *mut u16,
+}
+
+/// Source profile stop result.
+#[repr(C)]
+pub struct ProfilerSourceStopResult {
+    pub success: bool,
+    pub session_id: *mut u16,
+    pub remote_bundle_path: *mut u16,
+    pub warnings: *mut *mut u16,
+    pub warnings_count: usize,
+    pub message: *mut u16,
+}
+
 /// Health check result from the daemon.
 #[repr(C)]
 pub struct ProfilerHealthInfo {

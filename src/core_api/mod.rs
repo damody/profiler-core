@@ -2,7 +2,8 @@ use thiserror::Error;
 
 pub use crate::adb::DeviceInfo;
 pub use crate::grpc::client::{
-    GenericResult, PackageInfoResult, PerfettoStatusInfo, RtbStreamOptions, ShellResult, TopAppInfo,
+    GenericResult, PackageInfoResult, PerfettoStatusInfo, RtbStreamOptions, ShellResult,
+    SourceProfileCapabilityOptions, SourceProfileStartOptions, TopAppInfo,
 };
 
 pub type CoreResult<T> = Result<T, CoreError>;
@@ -726,6 +727,95 @@ impl CoreApi {
             .map_err(CoreError::from_anyhow)
     }
 
+    pub async fn source_profile_capability(
+        serial: &str,
+        options: SourceProfileCapabilityOptions,
+    ) -> CoreResult<crate::proto::SourceProfileCapabilityResponse> {
+        validate_non_empty("serial", serial)?;
+        let mut conns = connected_clients();
+        let entry = connected_entry(&mut conns, serial)?;
+        entry
+            .client
+            .source_profile_capability(options)
+            .await
+            .map_err(CoreError::from_anyhow)
+    }
+
+    pub async fn source_profile_start(
+        serial: &str,
+        options: SourceProfileStartOptions,
+    ) -> CoreResult<crate::proto::SourceProfileStartResponse> {
+        validate_non_empty("serial", serial)?;
+        validate_source_profile_target(&options.package_name, options.pid)?;
+        if options.sample_period == 0 {
+            return Err(CoreError::InvalidInput(
+                "source profile sample_period must be greater than zero".to_string(),
+            ));
+        }
+        if options.pmu_buffer_pages == 0 {
+            return Err(CoreError::InvalidInput(
+                "source profile PMU buffer pages must be greater than zero".to_string(),
+            ));
+        }
+        let mut conns = connected_clients();
+        let entry = connected_entry(&mut conns, serial)?;
+        entry
+            .client
+            .source_profile_start(options)
+            .await
+            .map_err(CoreError::from_anyhow)
+    }
+
+    pub async fn source_profile_status(
+        serial: &str,
+        session_id: &str,
+    ) -> CoreResult<crate::proto::SourceProfileStatusResponse> {
+        validate_non_empty("serial", serial)?;
+        let mut conns = connected_clients();
+        let entry = connected_entry(&mut conns, serial)?;
+        entry
+            .client
+            .source_profile_status(session_id)
+            .await
+            .map_err(CoreError::from_anyhow)
+    }
+
+    pub async fn source_profile_stop(
+        serial: &str,
+        session_id: &str,
+        reason: &str,
+    ) -> CoreResult<crate::proto::SourceProfileStopResponse> {
+        validate_non_empty("serial", serial)?;
+        let mut conns = connected_clients();
+        let entry = connected_entry(&mut conns, serial)?;
+        entry
+            .client
+            .source_profile_stop(session_id, reason)
+            .await
+            .map_err(CoreError::from_anyhow)
+    }
+
+    pub async fn pull_source_bundle(
+        serial: &str,
+        remote_bundle_path: &str,
+        local_archive_path: &str,
+    ) -> CoreResult<String> {
+        validate_non_empty("serial", serial)?;
+        validate_non_empty("remote bundle path", remote_bundle_path)?;
+        validate_non_empty("local archive path", local_archive_path)?;
+        let mut conns = connected_clients();
+        let entry = connected_entry(&mut conns, serial)?;
+        entry
+            .client
+            .pull_source_bundle(
+                remote_bundle_path,
+                local_archive_path,
+                |_current, _total| {},
+            )
+            .await
+            .map_err(CoreError::from_anyhow)
+    }
+
     pub async fn pull_file(serial: &str, remote_path: &str, local_path: &str) -> CoreResult<()> {
         validate_non_empty("serial", serial)?;
         validate_non_empty("remote path", remote_path)?;
@@ -895,5 +985,15 @@ fn validate_positive_i32(field: &str, value: i32) -> CoreResult<()> {
         Err(CoreError::InvalidInput(format!(
             "{field} must be greater than zero"
         )))
+    }
+}
+
+fn validate_source_profile_target(package_name: &str, pid: u32) -> CoreResult<()> {
+    if pid == 0 && package_name.trim().is_empty() {
+        Err(CoreError::InvalidInput(
+            "source profile requires package name or pid".to_string(),
+        ))
+    } else {
+        Ok(())
     }
 }
