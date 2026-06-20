@@ -189,7 +189,7 @@ impl Default for SourceProfileStartOptions {
             },
             enable_pmu: true,
             enable_spe: true,
-            duration_ms: 60_000,
+            duration_ms: 10_000,
             pmu_buffer_pages: 8_192,
             spe_aux_buffer_bytes: 64 * 1024 * 1024,
             spe_ring_buffer_pages: 256,
