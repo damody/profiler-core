@@ -54,6 +54,8 @@ const SYNC_CMD_PUSH_FILE: u8 = 35;
 const SYNC_CMD_START_PERFETTO: u8 = 36;
 const SYNC_CMD_GET_PERFETTO_STATUS: u8 = 37;
 const SYNC_CMD_SET_DEVICE_ID: u8 = 42;
+const DEFAULT_UNARY_TIMEOUT: Duration = Duration::from_secs(5);
+const SHELL_UNARY_TIMEOUT: Duration = Duration::from_secs(3600);
 
 pub fn health(addr: &str) -> anyhow::Result<(String, String)> {
     let response: HealthResponse = send_unary(addr, SYNC_CMD_HEALTH, &Empty {})?;
@@ -97,12 +99,13 @@ pub fn get_surface_names(addr: &str, package_name: &str) -> anyhow::Result<Vec<S
 }
 
 pub fn shell(addr: &str, command: &str) -> anyhow::Result<ShellResponse> {
-    send_unary(
+    send_unary_with_timeout(
         addr,
         SYNC_CMD_SHELL,
         &ShellRequest {
             command: command.to_string(),
         },
+        SHELL_UNARY_TIMEOUT,
     )
 }
 
@@ -480,11 +483,24 @@ where
     Req: Message,
     Resp: Message + Default,
 {
+    send_unary_with_timeout(addr, opcode, request, DEFAULT_UNARY_TIMEOUT)
+}
+
+fn send_unary_with_timeout<Req, Resp>(
+    addr: &str,
+    opcode: u8,
+    request: &Req,
+    timeout: Duration,
+) -> anyhow::Result<Resp>
+where
+    Req: Message,
+    Resp: Message + Default,
+{
     let socket_addr = resolve_socket_addr(addr)?;
     let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2))?;
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(DEFAULT_UNARY_TIMEOUT))?;
 
     stream.write_all(&[opcode])?;
     write_message(&mut stream, request)?;
@@ -492,6 +508,17 @@ where
 
     read_status(&mut stream)?;
     read_message(&mut stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_sync_control_timeout_allows_long_recording_commands() {
+        assert!(SHELL_UNARY_TIMEOUT > Duration::from_secs(10));
+        assert_eq!(DEFAULT_UNARY_TIMEOUT, Duration::from_secs(5));
+    }
 }
 
 fn receive_file_stream<Req, F>(
