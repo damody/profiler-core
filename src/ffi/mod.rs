@@ -1227,6 +1227,7 @@ unsafe fn source_start_options_from_ffi(
         duration_ms: options.duration_ms,
         pmu_buffer_pages: options.pmu_buffer_pages,
         spe_aux_buffer_bytes: options.spe_aux_buffer_bytes,
+        spe_max_output_bytes: options.spe_max_output_bytes,
         spe_ring_buffer_pages: options.spe_ring_buffer_pages,
         sample_period: options.sample_period,
         callchain_depth: options.callchain_depth,

@@ -168,6 +168,7 @@ pub struct ProfilerSourceStartOptions {
     pub duration_ms: u64,
     pub pmu_buffer_pages: u32,
     pub spe_aux_buffer_bytes: u64,
+    pub spe_max_output_bytes: u64,
     pub spe_ring_buffer_pages: u32,
     pub sample_period: u64,
     pub callchain_depth: u32,
