@@ -1234,6 +1234,10 @@ unsafe fn source_start_options_from_ffi(
             1 => crate::proto::SourceSpeCaptureScope::CpuOnlySystemWide,
             _ => crate::proto::SourceSpeCaptureScope::TopHotThreads,
         },
+        spe_operation_filter: match options.spe_operation_filter {
+            1 => crate::proto::SourceSpeOperationFilterMode::MemoryBranchOnly,
+            _ => crate::proto::SourceSpeOperationFilterMode::AllOps,
+        },
         sample_period: options.sample_period,
         callchain_depth: options.callchain_depth,
         output_remote_root: from_wide_ptr(options.output_remote_root),
