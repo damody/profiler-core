@@ -1244,6 +1244,7 @@ unsafe fn source_start_options_from_ffi(
             options.source_root_hints_count,
         ),
         path_remaps,
+        bundle_device_debug_elfs: options.bundle_device_debug_elfs,
     }
 }
 

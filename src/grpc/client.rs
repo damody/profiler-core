@@ -176,6 +176,7 @@ pub struct SourceProfileStartOptions {
     pub debug_elf_hints: Vec<String>,
     pub source_root_hints: Vec<String>,
     pub path_remaps: Vec<SourcePathRemapOption>,
+    pub bundle_device_debug_elfs: bool,
 }
 
 impl Default for SourceProfileStartOptions {
@@ -200,6 +201,7 @@ impl Default for SourceProfileStartOptions {
             debug_elf_hints: Vec::new(),
             source_root_hints: Vec::new(),
             path_remaps: Vec::new(),
+            bundle_device_debug_elfs: false,
         }
     }
 }
@@ -474,6 +476,7 @@ impl ProfilerClient {
                         to: remap.to,
                     })
                     .collect(),
+                bundle_device_debug_elfs: options.bundle_device_debug_elfs,
             })
             .await
             .context("SourceProfileStart RPC failed")?

@@ -180,6 +180,7 @@ pub struct ProfilerSourceStartOptions {
     pub source_root_hints_count: usize,
     pub path_remaps: *const ProfilerSourcePathRemap,
     pub path_remaps_count: usize,
+    pub bundle_device_debug_elfs: bool,
 }
 
 /// Capability detail row for one raw PMU/SPE capability probe.
