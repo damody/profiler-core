@@ -1230,6 +1230,10 @@ unsafe fn source_start_options_from_ffi(
         spe_aux_buffer_bytes: options.spe_aux_buffer_bytes,
         spe_max_output_bytes: options.spe_max_output_bytes,
         spe_ring_buffer_pages: options.spe_ring_buffer_pages,
+        spe_capture_scope: match options.spe_capture_scope {
+            1 => crate::proto::SourceSpeCaptureScope::CpuOnlySystemWide,
+            _ => crate::proto::SourceSpeCaptureScope::TopHotThreads,
+        },
         sample_period: options.sample_period,
         callchain_depth: options.callchain_depth,
         output_remote_root: from_wide_ptr(options.output_remote_root),

@@ -171,6 +171,7 @@ pub struct ProfilerSourceStartOptions {
     pub spe_aux_buffer_bytes: u64,
     pub spe_max_output_bytes: u64,
     pub spe_ring_buffer_pages: u32,
+    pub spe_capture_scope: u32,
     pub sample_period: u64,
     pub callchain_depth: u32,
     pub output_remote_root: *const u16,

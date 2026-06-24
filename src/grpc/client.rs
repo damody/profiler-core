@@ -13,8 +13,8 @@ use crate::proto::{
     SetChargingRequest, SetDeviceIdRequest, ShellRequest, SourceCpuSelection, SourcePathRemap,
     SourceProfileCapabilityRequest, SourceProfileCapabilityResponse, SourceProfileStartRequest,
     SourceProfileStartResponse, SourceProfileStatusRequest, SourceProfileStatusResponse,
-    SourceProfileStopRequest, SourceProfileStopResponse, StopRecordingRequest, StopResponse,
-    TcStreamRequest,
+    SourceProfileStopRequest, SourceProfileStopResponse, SourceSpeCaptureScope,
+    StopRecordingRequest, StopResponse, TcStreamRequest,
 };
 
 /// High-level wrapper around the gRPC ProfilerServiceClient.
@@ -171,6 +171,7 @@ pub struct SourceProfileStartOptions {
     pub spe_aux_buffer_bytes: u64,
     pub spe_max_output_bytes: u64,
     pub spe_ring_buffer_pages: u32,
+    pub spe_capture_scope: SourceSpeCaptureScope,
     pub sample_period: u64,
     pub callchain_depth: u32,
     pub output_remote_root: String,
@@ -198,6 +199,7 @@ impl Default for SourceProfileStartOptions {
             spe_aux_buffer_bytes: 64 * 1024 * 1024,
             spe_max_output_bytes: 1024 * 1024 * 1024,
             spe_ring_buffer_pages: 256,
+            spe_capture_scope: SourceSpeCaptureScope::TopHotThreads,
             sample_period: 1_000,
             callchain_depth: 16,
             output_remote_root: "/data/local/tmp/mprofiler/source_profile".to_string(),
@@ -468,6 +470,7 @@ impl ProfilerClient {
                 spe_aux_buffer_bytes: options.spe_aux_buffer_bytes,
                 spe_max_output_bytes: options.spe_max_output_bytes,
                 spe_ring_buffer_pages: options.spe_ring_buffer_pages,
+                spe_capture_scope: options.spe_capture_scope as i32,
                 sample_period: options.sample_period,
                 callchain_depth: options.callchain_depth,
                 output_remote_root: options.output_remote_root,
