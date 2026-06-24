@@ -167,6 +167,7 @@ pub struct ProfilerSourceStartOptions {
     pub enable_spe: bool,
     pub duration_ms: u64,
     pub pmu_buffer_pages: u32,
+    pub pmu_max_output_bytes: u64,
     pub spe_aux_buffer_bytes: u64,
     pub spe_max_output_bytes: u64,
     pub spe_ring_buffer_pages: u32,
