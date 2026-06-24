@@ -26,11 +26,15 @@ async fn main() -> anyhow::Result<()> {
             "--package" => package_name = next_value(&mut args, "--package")?,
             "--pid" => pid = next_value(&mut args, "--pid")?.parse()?,
             "--duration-ms" => duration_ms = next_value(&mut args, "--duration-ms")?.parse()?,
-            "--sample-period" => sample_period = next_value(&mut args, "--sample-period")?.parse()?,
+            "--sample-period" => {
+                sample_period = next_value(&mut args, "--sample-period")?.parse()?
+            }
             "--pmu-buffer-pages" => {
                 pmu_buffer_pages = next_value(&mut args, "--pmu-buffer-pages")?.parse()?
             }
-            "--callchain-depth" => callchain_depth = next_value(&mut args, "--callchain-depth")?.parse()?,
+            "--callchain-depth" => {
+                callchain_depth = next_value(&mut args, "--callchain-depth")?.parse()?
+            }
             "--event" => requested_event_keys.push(next_value(&mut args, "--event")?),
             "--no-spe" => enable_spe = false,
             "--out" => out = next_value(&mut args, "--out")?,
@@ -111,7 +115,11 @@ async fn main() -> anyhow::Result<()> {
         }
         println!(
             "status: state={} progress={:.1}% samples={} lost={} message={}",
-            status.state, status.progress_pct, status.sample_count, status.lost_count, status.message
+            status.state,
+            status.progress_pct,
+            status.sample_count,
+            status.lost_count,
+            status.message
         );
 
         match status.state {
