@@ -96,6 +96,8 @@ pub struct ProfilerRtbData {
     pub process_name: *mut u16,
     pub mem_total_kb: u64,
     pub mem_available_kb: u64,
+    /// Nullable UTF-16 daemon-side FPS diagnostic when FPS is unavailable.
+    pub fps_diagnostic: *mut u16,
 }
 
 /// RTB stream metric selection options (passed from C#).

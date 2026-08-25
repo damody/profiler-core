@@ -850,6 +850,11 @@ pub extern "C" fn profiler_poll_rtb(handle: u64, out: *mut ProfilerRtbData) -> b
                 };
                 (*out).mem_total_kb = dp.mem_total_kb;
                 (*out).mem_available_kb = dp.mem_available_kb;
+                (*out).fps_diagnostic = if dp.fps_diagnostic.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    to_wide_ptr(&dp.fps_diagnostic)
+                };
             }
             true
         }
@@ -891,6 +896,9 @@ pub extern "C" fn profiler_free_rtb_data(data: *mut ProfilerRtbData) {
         }
         (*data).cpu_usages_pct = ptr::null_mut();
         (*data).cpu_usages_count = 0;
+
+        free_wide_ptr((*data).fps_diagnostic);
+        (*data).fps_diagnostic = ptr::null_mut();
 
         let ft_ptr = (*data).frame_times_ms;
         let ft_count = (*data).frame_times_count;
@@ -1693,6 +1701,57 @@ pub extern "C" fn profiler_adb_shell(
             crate::set_last_error(&msg);
             ProfilerResult::OperationFailed
         }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_adb_reverse(
+    serial: *const u16,
+    device_port: u16,
+    host_port: u16,
+) -> ProfilerResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if serial.is_null() || device_port == 0 || host_port == 0 {
+            return ProfilerResult::InvalidParameter;
+        }
+        let serial = unsafe { from_wide_ptr(serial) };
+        match crate::runtime().block_on(adb::commands::reverse(&serial, device_port, host_port)) {
+            Ok(()) => ProfilerResult::Ok,
+            Err(error) => {
+                let message = format!("profiler_adb_reverse failed: {error:#}");
+                log::error!("{message}");
+                crate::set_last_error(message);
+                ProfilerResult::OperationFailed
+            }
+        }
+    })) {
+        Ok(result) => result,
+        Err(_) => ProfilerResult::OperationFailed,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn profiler_adb_reverse_remove(
+    serial: *const u16,
+    device_port: u16,
+) -> ProfilerResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if serial.is_null() || device_port == 0 {
+            return ProfilerResult::InvalidParameter;
+        }
+        let serial = unsafe { from_wide_ptr(serial) };
+        match crate::runtime().block_on(adb::commands::reverse_remove(&serial, device_port)) {
+            Ok(()) => ProfilerResult::Ok,
+            Err(error) => {
+                let message = format!("profiler_adb_reverse_remove failed: {error:#}");
+                log::error!("{message}");
+                crate::set_last_error(message);
+                ProfilerResult::OperationFailed
+            }
+        }
+    })) {
+        Ok(result) => result,
+        Err(_) => ProfilerResult::OperationFailed,
     }
 }
 

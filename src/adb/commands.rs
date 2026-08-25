@@ -158,3 +158,43 @@ pub async fn forward(serial: &str, local_port: u16, remote_port: u16) -> Result<
 
     Ok(())
 }
+
+/// Set up ADB reverse forwarding: device TCP port -> host TCP port.
+pub async fn reverse(serial: &str, device_port: u16, host_port: u16) -> Result<()> {
+    let output = super::adb_command()
+        .args([
+            "-s",
+            serial,
+            "reverse",
+            &format!("tcp:{device_port}"),
+            &format!("tcp:{host_port}"),
+        ])
+        .output()
+        .await
+        .context("Failed to execute adb reverse")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("adb reverse failed: {stderr}");
+    }
+    Ok(())
+}
+
+/// Remove one ADB reverse forwarding entry.
+pub async fn reverse_remove(serial: &str, device_port: u16) -> Result<()> {
+    let output = super::adb_command()
+        .args([
+            "-s",
+            serial,
+            "reverse",
+            "--remove",
+            &format!("tcp:{device_port}"),
+        ])
+        .output()
+        .await
+        .context("Failed to remove adb reverse")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("adb reverse --remove failed: {stderr}");
+    }
+    Ok(())
+}
