@@ -4731,7 +4731,6 @@ pub extern "C" fn profiler_start_gc(
         interval_secs,
         counter_ids: ids.to_vec(),
     };
-
     if entry.daemon_low_overhead {
         if let Some(sync_addr) = sync_control_addr(entry) {
             match grpc::streaming::GcStreamHandle::start_sync(&sync_addr, sync_request, 512) {

@@ -836,3 +836,65 @@ impl GcStreamHandle {
         }
     }
 }
+
+#[cfg(test)]
+mod gpu_hardware_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "requires ANDROID_PROFILER_GPU_SYNC_SMOKE=1 and an adb-forwarded sync daemon"]
+    fn connected_sync_gpu_counter_stream_returns_values() {
+        if std::env::var_os("ANDROID_PROFILER_GPU_SYNC_SMOKE").as_deref() != Some("1".as_ref()) {
+            return;
+        }
+        let addr = std::env::var("ANDROID_PROFILER_GPU_SYNC_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:50552".to_string());
+        let counter_ids = std::env::var("ANDROID_PROFILER_GPU_COUNTER_IDS")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|part| part.trim().parse().ok())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|ids| !ids.is_empty())
+            .unwrap_or_else(|| vec![80]);
+        let handle = GcStreamHandle::start_sync(
+            &addr,
+            GcStreamRequest {
+                gpu_device_number: 0,
+                interval_secs: 0.25,
+                counter_ids: counter_ids.clone(),
+            },
+            64,
+        )
+        .expect("start direct sync GPU stream");
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut last_point = None;
+        let point = loop {
+            if let Some(point) = handle.poll() {
+                eprintln!("direct GPU counter evidence: {:?}", point.counters);
+                if point
+                    .counters
+                    .iter()
+                    .any(|counter| counter.value.is_finite() && counter.value != 0.0)
+                {
+                    break point;
+                }
+                last_point = Some(point);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "GPU stream produced no non-zero samples; last={last_point:?}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        assert_eq!(point.counters.len(), counter_ids.len());
+        assert!(point.counters.iter().all(|counter| {
+            counter_ids.contains(&counter.counter_id) && counter.value.is_finite()
+        }));
+        handle.cancel();
+    }
+}
