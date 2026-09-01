@@ -293,8 +293,14 @@ pub async fn ensure_running_rooted(
     match get_daemon_uid(serial).await {
         Some(0) => match daemon_low_overhead_matches(serial, low_overhead).await {
             Some(true) => {
-                log::info!("[{serial}] daemon 已為 root，沿用現有進程");
-                Ok(())
+                if daemon_build_matches(serial, local_path).await == Some(false) {
+                    log::info!("[{serial}] daemon 版本與目前套件不同，重新部署...");
+                    kill_daemon(serial).await;
+                    deploy_and_start(serial, local_path, remote_path, grpc_port, low_overhead).await
+                } else {
+                    log::info!("[{serial}] daemon 已為 root 且版本相符，沿用現有進程");
+                    Ok(())
+                }
             }
             Some(false) => {
                 log::info!("[{serial}] daemon low-overhead 設定已變更，重啟套用...");
@@ -318,6 +324,25 @@ pub async fn ensure_running_rooted(
             deploy_and_start(serial, local_path, remote_path, grpc_port, low_overhead).await
         }
     }
+}
+
+async fn daemon_build_matches(serial: &str, local_path: &str) -> Option<bool> {
+    let expected = std::path::Path::new(local_path)
+        .parent()?
+        .join("version.txt");
+    let expected = std::fs::read_to_string(expected).ok()?;
+    let expected = expected.trim();
+    if expected.is_empty() {
+        return None;
+    }
+    let pid = get_daemon_pid(serial).await?;
+    let actual = commands::shell(
+        serial,
+        &format!("/proc/{pid}/exe --version 2>&1 | head -n 1"),
+    )
+    .await
+    .ok()?;
+    Some(actual.contains(expected))
 }
 
 async fn daemon_low_overhead_matches(serial: &str, expected_low_overhead: bool) -> Option<bool> {
