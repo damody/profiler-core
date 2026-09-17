@@ -3479,6 +3479,88 @@ pub extern "C" fn profiler_extract_archive(
     })
 }
 
+/// Stream `tar -c` from the daemon as 1 MiB lz4 blocks into a local `.tar.lz4b`.
+#[no_mangle]
+pub extern "C" fn profiler_stream_tar_lz4(
+    serial: *const u16,
+    working_directory: *const u16,
+    target: *const u16,
+    local_path: *const u16,
+    cb: Option<ProgressCallback>,
+    user_data: *mut c_void,
+) -> ProfilerResult {
+    if working_directory.is_null() || target.is_null() || local_path.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let dir_str = unsafe { from_wide_ptr(working_directory) };
+    let target_str = unsafe { from_wide_ptr(target) };
+    let local_str = unsafe { from_wide_ptr(local_path) };
+    let user_data_val = user_data as usize;
+
+    with_connection!(serial, |_rt, entry| {
+        let Some(addr) = sync_control_addr(entry) else {
+            log::error!("profiler_stream_tar_lz4: sync control is required");
+            crate::set_last_error("sync control is required for lz4 archive stream");
+            return ProfilerResult::OperationFailed;
+        };
+        match grpc::sync_control::stream_tar_lz4(
+            &addr,
+            &dir_str,
+            &target_str,
+            &local_str,
+            |done, total| {
+                if let Some(callback) = cb {
+                    callback(done, total, user_data_val as *mut c_void);
+                }
+            },
+        ) {
+            Ok(_) => ProfilerResult::Ok,
+            Err(e) => {
+                log::error!("profiler_stream_tar_lz4: {e:#}");
+                crate::set_last_error(format!("{e:#}"));
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
+/// Stream a local `.tar.lz4b` into daemon `tar -x` stdin.
+#[no_mangle]
+pub extern "C" fn profiler_untar_lz4(
+    serial: *const u16,
+    working_directory: *const u16,
+    local_path: *const u16,
+    cb: Option<ProgressCallback>,
+    user_data: *mut c_void,
+) -> ProfilerResult {
+    if working_directory.is_null() || local_path.is_null() {
+        return ProfilerResult::InvalidParameter;
+    }
+    let dir_str = unsafe { from_wide_ptr(working_directory) };
+    let local_str = unsafe { from_wide_ptr(local_path) };
+    let user_data_val = user_data as usize;
+
+    with_connection!(serial, |_rt, entry| {
+        let Some(addr) = sync_control_addr(entry) else {
+            log::error!("profiler_untar_lz4: sync control is required");
+            crate::set_last_error("sync control is required for lz4 archive stream");
+            return ProfilerResult::OperationFailed;
+        };
+        match grpc::sync_control::untar_lz4(&addr, &dir_str, &local_str, |done, total| {
+            if let Some(callback) = cb {
+                callback(done, total, user_data_val as *mut c_void);
+            }
+        }) {
+            Ok(_) => ProfilerResult::Ok,
+            Err(e) => {
+                log::error!("profiler_untar_lz4: {e:#}");
+                crate::set_last_error(format!("{e:#}"));
+                ProfilerResult::OperationFailed
+            }
+        }
+    })
+}
+
 /// Change file permissions on the device.
 #[no_mangle]
 pub extern "C" fn profiler_chmod(

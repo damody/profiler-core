@@ -54,6 +54,10 @@ const SYNC_CMD_PUSH_FILE: u8 = 35;
 const SYNC_CMD_START_PERFETTO: u8 = 36;
 const SYNC_CMD_GET_PERFETTO_STATUS: u8 = 37;
 const SYNC_CMD_SET_DEVICE_ID: u8 = 42;
+const SYNC_CMD_STREAM_TAR_LZ4: u8 = 43;
+const SYNC_CMD_UNTAR_LZ4: u8 = 44;
+const SYNC_MAX_MESSAGE_LEN: usize = 2 * 1024 * 1024;
+const FILE_STREAM_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_UNARY_TIMEOUT: Duration = Duration::from_secs(5);
 const SHELL_UNARY_TIMEOUT: Duration = Duration::from_secs(3600);
 
@@ -266,7 +270,7 @@ pub fn create_archive(
     target: &str,
     output_path: &str,
 ) -> anyhow::Result<GenericResponse> {
-    send_unary(
+    send_unary_with_timeout(
         addr,
         SYNC_CMD_CREATE_ARCHIVE,
         &CreateArchiveRequest {
@@ -274,6 +278,7 @@ pub fn create_archive(
             target: target.to_string(),
             output_path: output_path.to_string(),
         },
+        SHELL_UNARY_TIMEOUT,
     )
 }
 
@@ -282,13 +287,14 @@ pub fn extract_archive(
     working_directory: &str,
     archive_path: &str,
 ) -> anyhow::Result<GenericResponse> {
-    send_unary(
+    send_unary_with_timeout(
         addr,
         SYNC_CMD_EXTRACT_ARCHIVE,
         &ExtractArchiveRequest {
             working_directory: working_directory.to_string(),
             archive_path: archive_path.to_string(),
         },
+        SHELL_UNARY_TIMEOUT,
     )
 }
 
@@ -298,7 +304,7 @@ pub fn chmod(
     mode: &str,
     recursive: bool,
 ) -> anyhow::Result<GenericResponse> {
-    send_unary(
+    send_unary_with_timeout(
         addr,
         SYNC_CMD_CHMOD,
         &ChmodRequest {
@@ -306,6 +312,7 @@ pub fn chmod(
             mode: mode.to_string(),
             recursive,
         },
+        SHELL_UNARY_TIMEOUT,
     )
 }
 
@@ -316,7 +323,7 @@ pub fn chown(
     gid: i32,
     recursive: bool,
 ) -> anyhow::Result<GenericResponse> {
-    send_unary(
+    send_unary_with_timeout(
         addr,
         SYNC_CMD_CHOWN,
         &ChownRequest {
@@ -325,6 +332,7 @@ pub fn chown(
             gid,
             recursive,
         },
+        SHELL_UNARY_TIMEOUT,
     )
 }
 
@@ -405,8 +413,8 @@ where
     let socket_addr = resolve_socket_addr(addr)?;
     let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2))?;
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_read_timeout(Some(FILE_STREAM_TIMEOUT))?;
+    stream.set_write_timeout(Some(FILE_STREAM_TIMEOUT))?;
     stream.write_all(&[SYNC_CMD_PUSH_FILE])?;
 
     let mut file = File::open(local_path)?;
@@ -453,6 +461,156 @@ where
     }
     progress_cb(response.bytes_written, response.bytes_written);
     Ok(response.bytes_written)
+}
+
+pub fn stream_tar_lz4<F>(
+    addr: &str,
+    working_directory: &str,
+    target: &str,
+    local_path: &str,
+    progress_cb: F,
+) -> anyhow::Result<u64>
+where
+    F: Fn(u64, u64),
+{
+    let socket_addr = resolve_socket_addr(addr)?;
+    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2))?;
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(FILE_STREAM_TIMEOUT))?;
+    stream.set_write_timeout(Some(FILE_STREAM_TIMEOUT))?;
+    stream.write_all(&[SYNC_CMD_STREAM_TAR_LZ4])?;
+    write_message(
+        &mut stream,
+        &CreateArchiveRequest {
+            working_directory: working_directory.to_string(),
+            target: target.to_string(),
+            output_path: String::new(),
+        },
+    )?;
+    stream.flush()?;
+    read_status(&mut stream)?;
+
+    if let Some(parent) = std::path::Path::new(local_path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = File::create(local_path)?;
+    let mut uncompressed = 0u64;
+    let mut compressed = 0u64;
+    loop {
+        let chunk: FileChunk = read_message(&mut stream)?;
+        if !chunk.data.is_empty() {
+            uncompressed += lz4b_uncompressed_len(&chunk.data)?;
+            compressed += chunk.data.len() as u64;
+            file.write_all(&chunk.data)?;
+            progress_cb(uncompressed, 0);
+        }
+        if chunk.is_last {
+            break;
+        }
+    }
+    file.flush()?;
+    progress_cb(uncompressed, uncompressed);
+    Ok(compressed)
+}
+
+pub fn untar_lz4<F>(
+    addr: &str,
+    working_directory: &str,
+    local_path: &str,
+    progress_cb: F,
+) -> anyhow::Result<u64>
+where
+    F: Fn(u64, u64),
+{
+    let socket_addr = resolve_socket_addr(addr)?;
+    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2))?;
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(FILE_STREAM_TIMEOUT))?;
+    stream.set_write_timeout(Some(FILE_STREAM_TIMEOUT))?;
+    stream.write_all(&[SYNC_CMD_UNTAR_LZ4])?;
+    write_message(
+        &mut stream,
+        &CreateArchiveRequest {
+            working_directory: working_directory.to_string(),
+            target: String::new(),
+            output_path: String::new(),
+        },
+    )?;
+
+    let mut file = File::open(local_path)?;
+    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut sent = 0u64;
+    let mut lookahead = read_lz4b_block(&mut file)?;
+    if lookahead.is_none() {
+        write_message(
+            &mut stream,
+            &FileUploadChunk {
+                remote_path: String::new(),
+                data: Vec::new(),
+                is_last: true,
+            },
+        )?;
+    } else {
+        while let Some(block) = lookahead.take() {
+            sent += block.len() as u64;
+            lookahead = read_lz4b_block(&mut file)?;
+            write_message(
+                &mut stream,
+                &FileUploadChunk {
+                    remote_path: String::new(),
+                    data: block,
+                    is_last: lookahead.is_none(),
+                },
+            )?;
+            progress_cb(sent, total);
+        }
+    }
+    stream.flush()?;
+    read_status(&mut stream)?;
+    let response: GenericResponse = read_message(&mut stream)?;
+    if !response.success {
+        anyhow::bail!(
+            "sync untar lz4 failed: {}",
+            if response.message.is_empty() {
+                "tar extract failed"
+            } else {
+                &response.message
+            }
+        );
+    }
+    progress_cb(sent, sent);
+    Ok(sent)
+}
+
+fn lz4b_uncompressed_len(data: &[u8]) -> anyhow::Result<u64> {
+    if data.len() < 8 {
+        anyhow::bail!("truncated lz4b header");
+    }
+    let uncompressed = u32::from_le_bytes(data[0..4].try_into()?);
+    let compressed = u32::from_le_bytes(data[4..8].try_into()?) as usize;
+    if data.len() != 8 + compressed {
+        anyhow::bail!(
+            "lz4b length mismatch: header {compressed} payload {}",
+            data.len().saturating_sub(8)
+        );
+    }
+    Ok(u64::from(uncompressed))
+}
+
+fn read_lz4b_block(file: &mut File) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut header = [0u8; 8];
+    let n = file.read(&mut header)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if n < 8 {
+        file.read_exact(&mut header[n..])?;
+    }
+    let compressed = u32::from_le_bytes(header[4..8].try_into()?) as usize;
+    let mut block = vec![0u8; 8 + compressed];
+    block[..8].copy_from_slice(&header);
+    file.read_exact(&mut block[8..])?;
+    Ok(Some(block))
 }
 
 pub fn start_perfetto(
@@ -519,6 +677,34 @@ mod tests {
         assert!(SHELL_UNARY_TIMEOUT > Duration::from_secs(10));
         assert_eq!(DEFAULT_UNARY_TIMEOUT, Duration::from_secs(5));
     }
+
+    #[test]
+    fn archive_sync_control_uses_the_long_shell_timeout() {
+        assert_eq!(SHELL_UNARY_TIMEOUT, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn stream_tar_lz4_opcodes_follow_set_device_id() {
+        assert_eq!(SYNC_CMD_SET_DEVICE_ID, 42);
+        assert_eq!(SYNC_CMD_STREAM_TAR_LZ4, 43);
+        assert_eq!(SYNC_CMD_UNTAR_LZ4, 44);
+    }
+
+    #[test]
+    fn file_chunk_limit_allows_one_mib_lz4_block() {
+        assert_eq!(SYNC_MAX_MESSAGE_LEN, 2 * 1024 * 1024);
+        assert!(FILE_STREAM_TIMEOUT > Duration::from_secs(30));
+    }
+
+    #[test]
+    fn lz4b_header_reports_uncompressed_len() {
+        let mut block = Vec::new();
+        block.extend_from_slice(&32u32.to_le_bytes());
+        block.extend_from_slice(&4u32.to_le_bytes());
+        block.extend_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(lz4b_uncompressed_len(&block).unwrap(), 32);
+        assert!(lz4b_uncompressed_len(&[1, 2, 3]).is_err());
+    }
 }
 
 fn receive_file_stream<Req, F>(
@@ -535,8 +721,8 @@ where
     let socket_addr = resolve_socket_addr(addr)?;
     let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2))?;
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_read_timeout(Some(FILE_STREAM_TIMEOUT))?;
+    stream.set_write_timeout(Some(FILE_STREAM_TIMEOUT))?;
     stream.write_all(&[opcode])?;
     write_message(&mut stream, request)?;
     stream.flush()?;
@@ -607,7 +793,7 @@ where
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
-    if len > 1024 * 1024 {
+    if len > SYNC_MAX_MESSAGE_LEN {
         anyhow::bail!("sync response too large: {len}");
     }
     let mut buf = vec![0u8; len];
