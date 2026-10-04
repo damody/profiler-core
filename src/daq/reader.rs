@@ -35,8 +35,8 @@ pub struct CallbackContext {
     /// Pre-allocated read buffer reused across callbacks to avoid per-call allocation.
     /// Safety: only accessed from the single DAQmx callback thread.
     read_buf: UnsafeCell<Vec<f64>>,
-    pub error_count: AtomicU64,
-    pub lock_fail_count: AtomicU64,
+    pub error_count: Arc<AtomicU64>,
+    pub lock_fail_count: Arc<AtomicU64>,
 }
 
 // Safety: DaqmxLib function pointers are Send-safe as they point to
@@ -121,8 +121,8 @@ pub fn register_callback(
         buffer,
         num_channels,
         read_buf: UnsafeCell::new(vec![0.0f64; read_buf_size]),
-        error_count: AtomicU64::new(0),
-        lock_fail_count: AtomicU64::new(0),
+        error_count: Arc::new(AtomicU64::new(0)),
+        lock_fail_count: Arc::new(AtomicU64::new(0)),
     });
 
     let code = unsafe {

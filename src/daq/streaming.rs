@@ -1,6 +1,16 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+fn utc_ns() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+fn csv_name(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
 
 use crossbeam_queue::ArrayQueue;
 use log::{debug, error, info, warn};
@@ -15,6 +25,22 @@ use super::scale;
 use super::stats;
 use super::stats::{RunningPower, RunningStats};
 use super::task::DaqTask;
+
+// Previously started devices must be stopped if a later device fails setup.
+struct PendingTasks<'a> {
+    lib: &'a DaqmxLib,
+    handles: Vec<constants::TaskHandle>,
+}
+impl Drop for PendingTasks<'_> {
+    fn drop(&mut self) {
+        for &handle in &self.handles {
+            unsafe {
+                (self.lib.stop_task)(handle);
+                (self.lib.clear_task)(handle);
+            }
+        }
+    }
+}
 
 /// A single poll result pushed to the queue
 #[derive(Debug, Clone)]
@@ -120,8 +146,15 @@ impl DaqStreamHandle {
         let mut all_channel_metas: Vec<ChannelMeta> = Vec::new();
         let mut all_buffers: Vec<Arc<Mutex<AccumulationBuffer>>> = Vec::new();
         // We need to keep tasks and callback contexts alive
-        let mut task_handles: Vec<constants::TaskHandle> = Vec::new();
+        let mut pending_tasks = PendingTasks {
+            lib,
+            handles: Vec::new(),
+        };
 
+        // Separate device tasks do not share a hardware clock. Preserve each task's
+        // start bounds and each channel's own cumulative sample index.
+        let mut clock_records = Vec::new();
+        let mut callback_contexts = Vec::new();
         for dev in &devices {
             let dev_channels = channels_for_device(config, dev);
             if dev_channels.is_empty() {
@@ -246,6 +279,11 @@ impl DaqStreamHandle {
                 format!("Failed to register callback: {}", e)
             })?;
 
+            // DAQmx retains this pointer after registration, including a partially
+            // failed start. Keep it alive until the native task is cleared.
+            callback_contexts.push((ctx.error_count.clone(), ctx.lock_fail_count.clone()));
+            std::mem::forget(ctx);
+            let task_before = utc_ns();
             task.start().map_err(|e| {
                 error!("DAQ: Failed to start task for device '{}': {}", dev.name, e);
                 format!("Failed to start task: {}", e)
@@ -255,18 +293,28 @@ impl DaqStreamHandle {
                 task_name, num_valid, interval
             );
 
+            let task_after = utc_ns();
+            for meta in all_channel_metas.iter().rev().take(num_valid).rev() {
+                clock_records.push(format!(
+                    "start,{},{},{},0,0,{},0,0",
+                    csv_name(&meta.name),
+                    task_before,
+                    task_after,
+                    sample_rate
+                ));
+            }
             let handle = task.handle;
-            task_handles.push(handle);
+            pending_tasks.handles.push(handle);
             // Prevent Drop from clearing the task — we'll do it manually
             std::mem::forget(task);
-            std::mem::forget(ctx);
         }
 
-        if task_handles.is_empty() {
+        if pending_tasks.handles.is_empty() {
             error!("DAQ: No valid channels found for any device");
             return Err("No valid channels found for any device".to_string());
         }
 
+        let task_handles = std::mem::take(&mut pending_tasks.handles);
         let cancelled = Arc::new(AtomicBool::new(false));
         let queue = Arc::new(ArrayQueue::new(256));
         let error_queue = Arc::new(ArrayQueue::new(64));
@@ -287,6 +335,42 @@ impl DaqStreamHandle {
             use std::io::Write;
 
             let start_time = Instant::now();
+            let error_path = output_path.as_ref().map(|p| format!("{p}.errors.txt"));
+            let report_error = |message: String| {
+                if let Some(ref path) = error_path {
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                    {
+                        let _ = writeln!(f, "{} {}", utc_ns(), message);
+                    }
+                }
+                let _ = error_queue_clone.push(message);
+                cancelled_clone.store(true, Ordering::Relaxed);
+            };
+            let mut clock_writer = output_path.as_ref().and_then(|p| {
+                match std::fs::File::create(format!("{p}.clock.csv")) {
+                    Ok(f) => Some(std::io::BufWriter::new(f)),
+                    Err(e) => {
+                        report_error(format!("DAQ clock sidecar create: {e}"));
+                        None
+                    }
+                }
+            });
+            if let Some(ref mut w) = clock_writer {
+                let init = (|| -> std::io::Result<()> {
+                    writeln!(w,"kind,channel,host_before_ns,host_after_ns,sample_start,sample_count,sample_rate_hz,raw_row_start,raw_row_count")?;
+                    for record in &clock_records {
+                        writeln!(w, "{record}")?;
+                    }
+                    w.flush()
+                })();
+                if let Err(e) = init {
+                    report_error(format!("DAQ clock header: {e}"));
+                }
+            }
+            let mut channel_indices = vec![0u64; all_channel_metas.len()];
             let total_channels: usize = all_channel_metas.len();
             let dt = 1.0 / rate;
 
@@ -347,7 +431,7 @@ impl DaqStreamHandle {
                         Err(e) => {
                             let msg = format!("Avro create failed: {}", e);
                             error!("DAQ: {}", msg);
-                            let _ = error_queue_clone.push(msg);
+                            report_error(msg);
                         }
                     }
                 } else {
@@ -355,18 +439,24 @@ impl DaqStreamHandle {
                         Ok(file) => {
                             let mut w = std::io::BufWriter::new(file);
                             // Write header
-                            let _ = write!(w, "timestamp_s");
-                            for meta in &channel_metas_clone {
-                                let _ = write!(w, ",{}", meta.name);
+                            let header = (|| -> std::io::Result<()> {
+                                write!(w, "timestamp_s")?;
+                                for meta in &channel_metas_clone {
+                                    write!(w, ",{}", csv_name(&meta.name))?;
+                                }
+                                writeln!(w)?;
+                                w.flush()
+                            })();
+                            if let Err(e) = header {
+                                report_error(format!("CSV header: {e}"));
                             }
-                            let _ = writeln!(w);
                             file_writer = Some(DaqFileWriter::Csv(w));
                             info!("DAQ: CSV streaming to {}", path);
                         }
                         Err(e) => {
                             let msg = format!("CSV create failed: {}", e);
                             error!("DAQ: {}", msg);
-                            let _ = error_queue_clone.push(msg);
+                            report_error(msg);
                         }
                     }
                 }
@@ -379,6 +469,17 @@ impl DaqStreamHandle {
             while !cancelled_clone.load(Ordering::Relaxed) {
                 std::thread::sleep(poll_interval);
 
+                if callback_contexts
+                    .iter()
+                    .any(|c| c.0.load(Ordering::Relaxed) > 0 || c.1.load(Ordering::Relaxed) > 0)
+                {
+                    report_error(
+                        "DAQ callback read/buffer error; hardware sample continuity is unknown"
+                            .into(),
+                    );
+                    break;
+                }
+                let drain_before = utc_ns();
                 // Drain all accumulated data from all buffers
                 let mut channel_offset = 0;
                 let mut chunk_data: Vec<Vec<f64>> =
@@ -399,7 +500,7 @@ impl DaqStreamHandle {
                             let msg =
                                 format!("Buffer mutex poisoned for buffer {}: {}", buf_idx, e);
                             error!("DAQ: {}", msg);
-                            let _ = error_queue_clone.push(msg);
+                            report_error(msg);
                         }
                     }
                 }
@@ -415,6 +516,30 @@ impl DaqStreamHandle {
                 total_samples_collected += chunk_sample_count as u64;
                 poll_count += 1;
 
+                let drain_after = utc_ns();
+                if let Some(ref mut w) = clock_writer {
+                    let record = (|| -> std::io::Result<()> {
+                        for (i, ch) in chunk_data.iter().enumerate() {
+                            writeln!(
+                                w,
+                                "chunk,{},{},{},{},{},{},{},{}",
+                                csv_name(&channel_metas_clone[i].name),
+                                drain_before,
+                                drain_after,
+                                channel_indices[i],
+                                ch.len(),
+                                sample_rate,
+                                file_sample_index,
+                                chunk_sample_count
+                            )?;
+                            channel_indices[i] += ch.len() as u64;
+                        }
+                        w.flush()
+                    })();
+                    if let Err(e) = record {
+                        report_error(format!("DAQ clock journal: {e}"));
+                    }
+                }
                 // Update incremental stats
                 for (i, ch) in chunk_data.iter().enumerate() {
                     running_stats[i].update_slice(ch);
@@ -443,25 +568,30 @@ impl DaqStreamHandle {
                 // Write file rows incrementally (CSV or Avro)
                 match file_writer {
                     Some(DaqFileWriter::Csv(ref mut w)) => {
-                        for sample_i in 0..chunk_sample_count {
-                            let _ = write!(w, "{:.6}", file_sample_index as f64 * dt);
-                            for ch in &chunk_data {
-                                if sample_i < ch.len() {
-                                    let _ = write!(w, ",{:.6}", ch[sample_i]);
-                                } else {
-                                    let _ = write!(w, ",");
+                        let write_result = (|| -> std::io::Result<()> {
+                            for sample_i in 0..chunk_sample_count {
+                                write!(w, "{:.6}", file_sample_index as f64 * dt)?;
+                                for ch in &chunk_data {
+                                    if sample_i < ch.len() {
+                                        write!(w, ",{:.6}", ch[sample_i])?;
+                                    } else {
+                                        write!(w, ",")?;
+                                    }
                                 }
+                                writeln!(w)?;
+                                file_sample_index += 1;
                             }
-                            let _ = writeln!(w);
-                            file_sample_index += 1;
+                            w.flush()
+                        })();
+                        if let Err(e) = write_result {
+                            report_error(format!("CSV write: {e}"));
                         }
-                        let _ = w.flush();
                     }
                     Some(DaqFileWriter::Avro(ref mut w)) => {
                         if let Err(e) = w.write_chunk(&chunk_data, &mut file_sample_index, dt) {
                             let msg = format!("Avro write error: {}", e);
                             error!("DAQ: {}", msg);
-                            let _ = error_queue_clone.push(msg);
+                            report_error(msg);
                         }
                     }
                     None => {}
@@ -529,11 +659,13 @@ impl DaqStreamHandle {
             // Flush and close file writer
             match file_writer {
                 Some(DaqFileWriter::Csv(mut w)) => {
-                    let _ = w.flush();
+                    if let Err(e) = w.flush() {
+                        report_error(format!("CSV finish: {e}"));
+                    }
                 }
                 Some(DaqFileWriter::Avro(w)) => {
                     if let Err(e) = w.finish() {
-                        error!("DAQ: Avro finish error: {}", e);
+                        report_error(format!("Avro finish: {e}"));
                     }
                 }
                 None => {}
@@ -556,13 +688,13 @@ impl DaqStreamHandle {
                     if stop_code != 0 {
                         let msg = format!("stop_task[{}] returned error code {}", i, stop_code);
                         warn!("DAQ: {}", msg);
-                        let _ = error_queue_clone.push(msg);
+                        report_error(msg);
                     }
                     let clear_code = (lib.clear_task)(handle);
                     if clear_code != 0 {
                         let msg = format!("clear_task[{}] returned error code {}", i, clear_code);
                         warn!("DAQ: {}", msg);
-                        let _ = error_queue_clone.push(msg);
+                        report_error(msg);
                     }
                 }
             }
@@ -638,6 +770,10 @@ impl DaqStreamHandle {
             return Err("DAQ: No thread handle available (already stopped?)".to_string());
         };
 
+        let errors = self.drain_errors();
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
         let measurement_time_s = result.start_time.elapsed().as_secs_f64();
 
         // Build per-channel summaries from pre-computed stats
