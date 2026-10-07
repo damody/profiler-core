@@ -417,11 +417,21 @@ impl DaqStreamHandle {
             enum DaqFileWriter {
                 Csv(std::io::BufWriter<std::fs::File>),
                 Avro(DaqAvroWriter),
+                Compact(super::compact::CompactWriter),
             }
             let mut file_writer: Option<DaqFileWriter> = None;
             let mut file_sample_index: u64 = 0;
             if let Some(ref path) = output_path {
-                if path.ends_with(".avro") {
+                if path.ends_with(".csv.gz") {
+                    let names = channel_metas_clone
+                        .iter()
+                        .map(|m| m.name.clone())
+                        .collect::<Vec<_>>();
+                    match super::compact::CompactWriter::new(path, &names, sample_rate) {
+                        Ok(w) => file_writer = Some(DaqFileWriter::Compact(w)),
+                        Err(e) => report_error(format!("Compact DAQ create: {e}")),
+                    }
+                } else if path.ends_with(".avro") {
                     let names: Vec<String> =
                         channel_metas_clone.iter().map(|m| m.name.clone()).collect();
                     match DaqAvroWriter::new(path, &names) {
@@ -517,21 +527,25 @@ impl DaqStreamHandle {
                 poll_count += 1;
 
                 let drain_after = utc_ns();
-                if let Some(ref mut w) = clock_writer {
+                let compact = output_path.as_ref().is_some_and(|p| p.ends_with(".csv.gz"));
+                if let Some(w) = clock_writer.as_mut() {
                     let record = (|| -> std::io::Result<()> {
                         for (i, ch) in chunk_data.iter().enumerate() {
-                            writeln!(
-                                w,
-                                "chunk,{},{},{},{},{},{},{},{}",
-                                csv_name(&channel_metas_clone[i].name),
-                                drain_before,
-                                drain_after,
-                                channel_indices[i],
-                                ch.len(),
-                                sample_rate,
-                                file_sample_index,
-                                chunk_sample_count
-                            )?;
+                            if !compact || poll_count % 600 == 0 {
+                                writeln!(
+                                    w,
+                                    "{},{},{},{},{},{},{},{},{}",
+                                    if compact { "anchor" } else { "chunk" },
+                                    csv_name(&channel_metas_clone[i].name),
+                                    drain_before,
+                                    drain_after,
+                                    channel_indices[i],
+                                    ch.len(),
+                                    sample_rate,
+                                    file_sample_index,
+                                    chunk_sample_count
+                                )?;
+                            }
                             channel_indices[i] += ch.len() as u64;
                         }
                         w.flush()
@@ -567,6 +581,11 @@ impl DaqStreamHandle {
 
                 // Write file rows incrementally (CSV or Avro)
                 match file_writer {
+                    Some(DaqFileWriter::Compact(ref mut w)) => {
+                        if let Err(e) = w.push(&chunk_data) {
+                            report_error(format!("Compact DAQ write: {e}"));
+                        }
+                    }
                     Some(DaqFileWriter::Csv(ref mut w)) => {
                         let write_result = (|| -> std::io::Result<()> {
                             for sample_i in 0..chunk_sample_count {
@@ -658,6 +677,11 @@ impl DaqStreamHandle {
 
             // Flush and close file writer
             match file_writer {
+                Some(DaqFileWriter::Compact(ref mut w)) => {
+                    if let Err(e) = w.finish() {
+                        report_error(format!("Compact DAQ finalize: {e}"));
+                    }
+                }
                 Some(DaqFileWriter::Csv(mut w)) => {
                     if let Err(e) = w.flush() {
                         report_error(format!("CSV finish: {e}"));

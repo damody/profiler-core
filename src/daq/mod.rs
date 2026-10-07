@@ -1,4 +1,5 @@
 pub mod avro_writer;
+pub mod compact;
 pub mod config;
 pub mod constants;
 pub mod device;
