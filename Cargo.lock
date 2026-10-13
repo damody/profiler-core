@@ -1272,6 +1272,7 @@ dependencies = [
  "anyhow",
  "apache-avro",
  "crossbeam-queue",
+ "flate2",
  "libloading",
  "log",
  "log4rs",

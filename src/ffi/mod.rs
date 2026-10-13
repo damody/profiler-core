@@ -1140,7 +1140,7 @@ pub extern "C" fn profiler_stop_recording(
         None => return ProfilerResult::DeviceNotFound,
     };
 
-    if type_str.is_empty() || type_str == "rtb" || type_str == "perfetto" {
+    if type_str.is_empty() || matches!(type_str.as_str(), "rtb" | "perfetto" | "cr" | "tc" | "cml" | "gc") {
         if let Some(addr) = sync_control_addr(entry) {
             match grpc::sync_control::stop_recording(&addr, &type_str) {
                 Ok(_) => return ProfilerResult::Ok,
