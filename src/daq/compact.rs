@@ -1,6 +1,6 @@
 //! Calibration storage: exact hardware-indexed 100-ms channel statistics.
 //! Acquire every ADC sample, but retain means/counts/extrema/second moments.
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use std::{
     collections::VecDeque,
     fs::File,
@@ -53,7 +53,8 @@ fn name(value: &str) -> String {
 }
 impl CompactWriter {
     pub fn new(path: &str, names: &[String], rate: u32) -> io::Result<Self> {
-        let mut writer = Self::with_limit(File::create(path)?, names, rate, MAX_DAQ_BYTES)?;
+        // Do not turn an advisory byte budget into an unattended recording stop.
+        let mut writer = Self::with_limit(File::create(path)?, names, rate, u64::MAX)?;
         writer.committed_path = Some(PathBuf::from(format!("{path}.committed")));
         writer.publish_commit()?;
         Ok(writer)
@@ -249,12 +250,11 @@ mod tests {
             .read_to_string(&mut text)
             .unwrap();
         assert_eq!(text.lines().count(), 1501);
-        assert!(text.lines().skip(1).all(|line| line
-            .split(',')
-            .skip(3)
-            .take(2)
-            .collect::<Vec<_>>()
-            == ["100", "100"]));
+        assert!(
+            text.lines()
+                .skip(1)
+                .all(|line| line.split(',').skip(3).take(2).collect::<Vec<_>>() == ["100", "100"])
+        );
         std::fs::remove_file(p).unwrap();
     }
 }

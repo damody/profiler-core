@@ -335,6 +335,7 @@ impl DaqStreamHandle {
             use std::io::Write;
 
             let start_time = Instant::now();
+            let unattended = output_path.as_ref().is_some_and(|p| p.ends_with(".csv.gz"));
             let error_path = output_path.as_ref().map(|p| format!("{p}.errors.txt"));
             let report_error = |message: String| {
                 if let Some(ref path) = error_path {
@@ -347,7 +348,9 @@ impl DaqStreamHandle {
                     }
                 }
                 let _ = error_queue_clone.push(message);
-                cancelled_clone.store(true, Ordering::Relaxed);
+                if !unattended {
+                    cancelled_clone.store(true, Ordering::Relaxed);
+                }
             };
             let mut clock_writer = output_path.as_ref().and_then(|p| {
                 match std::fs::File::create(format!("{p}.clock.csv")) {
@@ -479,15 +482,18 @@ impl DaqStreamHandle {
             while !cancelled_clone.load(Ordering::Relaxed) {
                 std::thread::sleep(poll_interval);
 
-                if callback_contexts
-                    .iter()
-                    .any(|c| c.0.load(Ordering::Relaxed) > 0 || c.1.load(Ordering::Relaxed) > 0)
+                let callback_fault = callback_contexts.iter().fold(false, |fault, c| {
+                    let reads = c.0.swap(0, Ordering::Relaxed);
+                    let buffers = c.1.swap(0, Ordering::Relaxed);
+                    fault || reads > 0 || buffers > 0
+                });
+                if callback_fault
                 {
                     report_error(
                         "DAQ callback read/buffer error; hardware sample continuity is unknown"
                             .into(),
                     );
-                    break;
+                    if !unattended { break; }
                 }
                 let drain_before = utc_ns();
                 // Drain all accumulated data from all buffers
