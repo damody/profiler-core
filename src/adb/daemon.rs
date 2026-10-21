@@ -18,6 +18,13 @@ enum RootMode {
 ///
 /// Returns the [`RootMode`] that was achieved.
 async fn ensure_root_and_permissive(serial: &str) -> RootMode {
+    // Keep an existing transport stable: restarting an already-root adbd would
+    // unnecessarily invalidate its transport ID on duplicate-serial phones.
+    if serial.starts_with("transport:") && matches!(commands::is_root_shell(serial).await, Ok(true))
+    {
+        let _ = commands::shell(serial, "setenforce 0").await;
+        return RootMode::Adb;
+    }
     // --- Try `adb root` first ---
     match commands::root(serial).await {
         Ok(msg) => log::info!("adb root response: {msg}"),

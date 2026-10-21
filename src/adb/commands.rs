@@ -3,7 +3,8 @@ use anyhow::{Context, Result};
 /// Run `adb -s <serial> shell <command>` and return stdout.
 pub async fn shell(serial: &str, command: &str) -> Result<String> {
     let output = super::adb_command()
-        .args(["-s", serial, "shell", command])
+        .args(super::device_selector(serial))
+        .args(["shell", command])
         .output()
         .await
         .context("Failed to execute adb shell")?;
@@ -19,7 +20,8 @@ pub async fn shell(serial: &str, command: &str) -> Result<String> {
 /// Push a local file to the device.
 pub async fn push(serial: &str, local: &str, remote: &str) -> Result<()> {
     let output = super::adb_command()
-        .args(["-s", serial, "push", "-z", "zstd", local, remote])
+        .args(super::device_selector(serial))
+        .args(["push", "-z", "zstd", local, remote])
         .output()
         .await
         .context("Failed to execute adb push")?;
@@ -35,7 +37,8 @@ pub async fn push(serial: &str, local: &str, remote: &str) -> Result<()> {
 /// Pull a remote file from the device to local.
 pub async fn pull(serial: &str, remote: &str, local: &str) -> Result<()> {
     let output = super::adb_command()
-        .args(["-s", serial, "pull", "-z", "zstd", remote, local])
+        .args(super::device_selector(serial))
+        .args(["pull", "-z", "zstd", remote, local])
         .output()
         .await
         .context("Failed to execute adb pull")?;
@@ -51,7 +54,8 @@ pub async fn pull(serial: &str, remote: &str, local: &str) -> Result<()> {
 /// Run `adb -s <serial> remount` to remount partitions as read-write.
 pub async fn remount(serial: &str) -> Result<String> {
     let output = super::adb_command()
-        .args(["-s", serial, "remount"])
+        .args(super::device_selector(serial))
+        .arg("remount")
         .output()
         .await
         .context("Failed to execute adb remount")?;
@@ -68,7 +72,8 @@ pub async fn remount(serial: &str) -> Result<String> {
 /// Run `adb -s <serial> root` to restart adbd as root.
 pub async fn root(serial: &str) -> Result<String> {
     let output = super::adb_command()
-        .args(["-s", serial, "root"])
+        .args(super::device_selector(serial))
+        .arg("root")
         .output()
         .await
         .context("Failed to execute adb root")?;
@@ -107,7 +112,8 @@ pub async fn disconnect_all() -> Result<String> {
 /// Run `adb -s <serial> tcpip <port>` to restart adbd in TCP/IP mode.
 pub async fn tcpip(serial: &str, port: u16) -> Result<String> {
     let output = super::adb_command()
-        .args(["-s", serial, "tcpip", &port.to_string()])
+        .args(super::device_selector(serial))
+        .args(["tcpip", &port.to_string()])
         .output()
         .await
         .context("Failed to execute adb tcpip")?;
@@ -139,11 +145,27 @@ pub async fn connect_device(ip: &str, port: u16) -> Result<String> {
 
 /// Set up ADB port forwarding: local TCP port -> device TCP port.
 pub async fn forward(serial: &str, local_port: u16, remote_port: u16) -> Result<()> {
+    static OWNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<(String, u16, u16)>>> = std::sync::OnceLock::new();
+    let owners = OWNED.get_or_init(Default::default);
+    let key = (serial.to_owned(), local_port, remote_port);
+    let listing = super::adb_command().args(super::device_selector(serial)).args(["forward", "--list"]).output().await?;
+    let local = format!("tcp:{local_port}");
+    let remote = format!("tcp:{remote_port}");
+    if listing.status.success() {
+        for line in String::from_utf8_lossy(&listing.stdout).lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() == 3 && fields[1] == local {
+                // A transport-key's raw serial may be duplicated; don't assume ownership.
+                // --no-rebind below fails closed in that case. Existing connections are reused by the caller.
+                if fields[2] == remote && ((!serial.starts_with("transport:") && fields[0] == serial) || owners.lock().unwrap().contains(&key)) { return Ok(()); }
+            }
+        }
+    }
     let output = super::adb_command()
+        .args(super::device_selector(serial))
         .args([
-            "-s",
-            serial,
             "forward",
+            "--no-rebind",
             &format!("tcp:{local_port}"),
             &format!("tcp:{remote_port}"),
         ])
@@ -156,15 +178,15 @@ pub async fn forward(serial: &str, local_port: u16, remote_port: u16) -> Result<
         anyhow::bail!("adb forward failed: {stderr}");
     }
 
+    owners.lock().unwrap().insert(key);
     Ok(())
 }
 
 /// Set up ADB reverse forwarding: device TCP port -> host TCP port.
 pub async fn reverse(serial: &str, device_port: u16, host_port: u16) -> Result<()> {
     let output = super::adb_command()
+        .args(super::device_selector(serial))
         .args([
-            "-s",
-            serial,
             "reverse",
             &format!("tcp:{device_port}"),
             &format!("tcp:{host_port}"),
@@ -182,13 +204,8 @@ pub async fn reverse(serial: &str, device_port: u16, host_port: u16) -> Result<(
 /// Remove one ADB reverse forwarding entry.
 pub async fn reverse_remove(serial: &str, device_port: u16) -> Result<()> {
     let output = super::adb_command()
-        .args([
-            "-s",
-            serial,
-            "reverse",
-            "--remove",
-            &format!("tcp:{device_port}"),
-        ])
+        .args(super::device_selector(serial))
+        .args(["reverse", "--remove", &format!("tcp:{device_port}")])
         .output()
         .await
         .context("Failed to remove adb reverse")?;

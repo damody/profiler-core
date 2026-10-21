@@ -29,6 +29,7 @@ fn parse_devices_output(output: &str) -> Result<Vec<DeviceInfo>> {
     let product_re = Regex::new(r"product:(\S+)").unwrap();
     let device_re = Regex::new(r"device:(\S+)").unwrap();
     let mut devices = Vec::new();
+    let mut transport_ids = Vec::new();
 
     for line in output.lines() {
         let line = line.trim();
@@ -70,6 +71,29 @@ fn parse_devices_output(output: &str) -> Result<Vec<DeviceInfo>> {
             product,
             device_name,
         });
+        transport_ids.push(parts.iter().find_map(|part| {
+            part.strip_prefix("transport_id:")
+                .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+                .map(str::to_owned)
+        }));
+    }
+
+    let mut serial_counts = std::collections::HashMap::new();
+    for device in &devices {
+        *serial_counts
+            .entry(device.serial.to_ascii_lowercase())
+            .or_insert(0usize) += 1;
+    }
+    for (device, transport_id) in devices.iter_mut().zip(transport_ids) {
+        if serial_counts[&device.serial.to_ascii_lowercase()] > 1 {
+            let id = transport_id.with_context(|| {
+                format!(
+                    "Duplicate ADB serial '{}' has no transport_id; cannot select a phone safely",
+                    device.serial,
+                )
+            })?;
+            device.serial = format!("transport:{id}");
+        }
     }
 
     Ok(devices)
@@ -78,6 +102,20 @@ fn parse_devices_output(output: &str) -> Result<Vec<DeviceInfo>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_serials_have_distinct_transport_keys() {
+        let devices = parse_devices_output("List of devices attached\n0123456789ABCDEF device model:phone_A transport_id:19\n0123456789ABCDEF device model:phone_B transport_id:20\n").unwrap();
+        assert_eq!(devices[0].serial, "transport:19");
+        assert_eq!(devices[1].serial, "transport:20");
+        assert_eq!(devices[0].model, "phone A");
+        assert_eq!(devices[1].model, "phone B");
+    }
+
+    #[test]
+    fn duplicate_serials_without_transport_ids_are_rejected() {
+        assert!(parse_devices_output("same device\nsame device\n").is_err());
+    }
 
     #[test]
     fn test_parse_devices_output() {
