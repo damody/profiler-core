@@ -20,9 +20,11 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, EXCEPTION_POINTERS,
 };
 
-/// Last error message from FFI operations (thread-local would be ideal but
-/// OnceLock<Mutex<>> is consistent with the rest of our global state).
-static LAST_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+// FFI errors belong to the calling thread, just like the immediate adapter call.
+// A process-wide slot loses one phone's error when another worker fails.
+thread_local! {
+    static LAST_ERROR: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
 static PANIC_HOOK_INIT: Once = Once::new();
 #[cfg(target_os = "windows")]
 static SEH_HOOK_INIT: Once = Once::new();
@@ -127,7 +129,6 @@ pub fn init_runtime() -> bool {
     let _ = NEXT_DAQ_HANDLE.set(Mutex::new(1));
     let _ = DAQ_CONFIGS.set(Mutex::new(HashMap::new()));
     let _ = NEXT_DAQ_CONFIG.set(Mutex::new(1));
-    let _ = LAST_ERROR.set(Mutex::new(String::new()));
 
     if created {
         log::info!("profiler-core runtime initialized");
@@ -435,9 +436,7 @@ pub fn install_crash_hook() {
 
             append_crash_log("rust panic", &detail);
 
-            if let Some(err) = LAST_ERROR.get() {
-                *err.lock() = format!("Rust panic at {location}: {payload}");
-            }
+            LAST_ERROR.with(|err| *err.borrow_mut() = format!("Rust panic at {location}: {payload}"));
 
             prev(info);
         }));
@@ -450,19 +449,32 @@ pub fn install_crash_hook() {
 /// Store an error message that can be retrieved by C# via `profiler_get_last_error`.
 pub fn set_last_error(msg: impl Into<String>) {
     let msg = msg.into();
-    if let Some(err) = LAST_ERROR.get() {
-        *err.lock() = msg.clone();
-    }
+    LAST_ERROR.with(|err| *err.borrow_mut() = msg.clone());
     append_crash_log("rust error", &msg);
 }
 
 /// Take the last error message (returns empty string if none).
 pub fn take_last_error() -> String {
-    LAST_ERROR
-        .get()
-        .map(|m| std::mem::take(&mut *m.lock()))
-        .unwrap_or_default()
+    LAST_ERROR.with(|err| std::mem::take(&mut *err.borrow_mut()))
 }
 
 // Re-export the shared protobuf code from mprofiler-proto.
 pub use mprofiler_proto::mprofiler as proto;
+
+/// Rust adapter diagnostic; does not change the C ABI or the on-device protocol.
+pub fn rtb_stream_error(handle: u64) -> Option<String> {
+    RTB_HANDLES.get().and_then(|handles| handles.lock().get(&handle).and_then(|h| h.error()))
+}
+
+#[cfg(test)]
+mod dual_device_error_tests {
+    #[test]
+    fn ffi_errors_are_isolated_between_threads() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = ["phone-A", "phone-B"].into_iter().map(|serial| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || { super::set_last_error(serial); barrier.wait(); assert_eq!(super::take_last_error(), serial); assert!(super::take_last_error().is_empty()); })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+    }
+}

@@ -32,12 +32,14 @@ const SYNC_CMD_START_GC_STREAM: u8 = 41;
 
 pub struct GrpcRtbStreamHandle {
     queue: Arc<ArrayQueue<RtbDataPoint>>,
+    error: Arc<std::sync::Mutex<Option<String>>>,
     cancel: CancellationToken,
     _task: JoinHandle<()>,
 }
 
 pub struct SyncRtbStreamHandle {
     queue: Arc<ArrayQueue<RtbDataPoint>>,
+    error: Arc<std::sync::Mutex<Option<String>>>,
     cancel: Arc<AtomicBool>,
     shutdown_stream: TcpStream,
     thread: ThreadJoinHandle<()>,
@@ -57,6 +59,8 @@ impl RtbStreamHandle {
         let queue = Arc::new(ArrayQueue::new(capacity));
         let cancel = CancellationToken::new();
 
+        let error = Arc::new(std::sync::Mutex::new(None));
+        let stream_error = error.clone();
         let q = queue.clone();
         let ct = cancel.clone();
         let count = Arc::new(AtomicU64::new(0));
@@ -88,15 +92,17 @@ impl RtbStreamHandle {
                                     Err(rejected) => {
                                         let _ = q.pop();
                                         let _ = q.push(rejected);
-                                        log::trace!("RTB queue full, dropped oldest sample");
+                                        *stream_error.lock().unwrap() = Some("RTB queue overflow: raw samples were dropped".into());
                                     }
                                 }
                             }
                             Ok(None) => {
+                                *stream_error.lock().unwrap() = Some("RTB stream closed unexpectedly".into());
                                 log::info!("RTB stream ended (server closed)");
                                 break;
                             }
                             Err(e) => {
+                                *stream_error.lock().unwrap() = Some(format!("RTB stream error: {e}"));
                                 log::error!("RTB stream error: {e}");
                                 break;
                             }
@@ -108,6 +114,7 @@ impl RtbStreamHandle {
 
         Self::Grpc(GrpcRtbStreamHandle {
             queue,
+            error,
             cancel,
             _task: task,
         })
@@ -126,6 +133,13 @@ impl RtbStreamHandle {
         match self {
             Self::Grpc(handle) => handle.queue.pop(),
             Self::Sync(handle) => handle.queue.pop(),
+        }
+    }
+
+    pub fn error(&self) -> Option<String> {
+        match self {
+            Self::Grpc(handle) => handle.error.lock().unwrap().clone(),
+            Self::Sync(handle) => handle.error.lock().unwrap().clone(),
         }
     }
 
@@ -167,6 +181,8 @@ impl SyncRtbStreamHandle {
         let shutdown_stream = stream.try_clone()?;
         let queue = Arc::new(ArrayQueue::new(capacity));
         let cancel = Arc::new(AtomicBool::new(false));
+        let error = Arc::new(std::sync::Mutex::new(None));
+        let stream_error = error.clone();
         let q = queue.clone();
         let ct = cancel.clone();
 
@@ -180,14 +196,15 @@ impl SyncRtbStreamHandle {
                             Err(rejected) => {
                                 let _ = q.pop();
                                 let _ = q.push(rejected);
-                                log::trace!("sync RTB queue full, dropped oldest sample");
+                                *stream_error.lock().unwrap() = Some("RTB queue overflow: raw samples were dropped".into());
                             }
                         },
-                        Ok(None) => break,
+                        Ok(None) => { *stream_error.lock().unwrap() = Some("RTB stream closed unexpectedly".into()); break; },
                         Err(e)
                             if e.kind() == std::io::ErrorKind::WouldBlock
                                 || e.kind() == std::io::ErrorKind::TimedOut => {}
                         Err(e) => {
+                            *stream_error.lock().unwrap() = Some(format!("RTB stream error: {e}"));
                             log::warn!("sync RTB read failed: {e}");
                             break;
                         }
@@ -197,6 +214,7 @@ impl SyncRtbStreamHandle {
 
         Ok(Self {
             queue,
+            error,
             cancel,
             shutdown_stream,
             thread,

@@ -425,11 +425,11 @@ pub extern "C" fn profiler_health_check(
     let serial_str = unsafe { from_wide_ptr(serial) };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     if let Some(addr) = sync_control_addr(entry) {
         match grpc::sync_control::health(&addr) {
@@ -458,7 +458,6 @@ pub extern "C" fn profiler_health_check(
             log::error!("profiler_health_check: {e:#}");
             // Connection is likely dead — remove it
             let serial_clone = serial_str.clone();
-            drop(conns);
             crate::connections().lock().remove(&serial_clone);
             ProfilerResult::DaemonNotRunning
         }
@@ -495,11 +494,11 @@ pub extern "C" fn profiler_get_top_app(
     let serial_str = unsafe { from_wide_ptr(serial) };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     if let Some(addr) = sync_control_addr(entry) {
         match grpc::sync_control::get_top_app(&addr) {
@@ -561,11 +560,11 @@ pub extern "C" fn profiler_get_pid(
     let package_str = unsafe { from_wide_ptr(package) };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     if let Some(addr) = sync_control_addr(entry) {
         match grpc::sync_control::get_pid(&addr, &package_str) {
@@ -682,11 +681,11 @@ pub extern "C" fn profiler_start_rtb_ex(
     };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     let sync_request = RtbStreamRequest {
         pid,
@@ -940,11 +939,11 @@ pub extern "C" fn profiler_start_perfetto(
     };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     if let Some(addr) = sync_control_addr(entry) {
         match grpc::sync_control::start_perfetto(&addr, pid, &mode_str, duration_secs, &pbtxt_str) {
@@ -999,11 +998,11 @@ pub extern "C" fn profiler_get_perfetto_status(
     let serial_str = unsafe { from_wide_ptr(serial) };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     if let Some(addr) = sync_control_addr(entry) {
         match grpc::sync_control::get_perfetto_status(&addr) {
@@ -1072,11 +1071,11 @@ pub extern "C" fn profiler_pull_file(
     let local_str = unsafe { from_wide_ptr(local) };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     // Wrap user_data in a Send-safe wrapper for the async block
     let user_data_val = user_data as usize;
@@ -1134,13 +1133,18 @@ pub extern "C" fn profiler_stop_recording(
     };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
-    if type_str.is_empty() || matches!(type_str.as_str(), "rtb" | "perfetto" | "cr" | "tc" | "cml" | "gc") {
+    if type_str.is_empty()
+        || matches!(
+            type_str.as_str(),
+            "rtb" | "perfetto" | "cr" | "tc" | "cml" | "gc"
+        )
+    {
         if let Some(addr) = sync_control_addr(entry) {
             match grpc::sync_control::stop_recording(&addr, &type_str) {
                 Ok(_) => return ProfilerResult::Ok,
@@ -1364,11 +1368,11 @@ pub extern "C" fn profiler_source_profile_capability(
     let serial_str = unsafe { from_wide_ptr(serial) };
     let options = unsafe { source_capability_options_from_ffi(&*options) };
     let rt = crate::runtime();
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
     match rt.block_on(entry.client.source_profile_capability(options)) {
         Ok(response) => {
             source_capability_to_ffi(response, out);
@@ -1435,11 +1439,11 @@ pub extern "C" fn profiler_source_profile_start(
     let serial_str = unsafe { from_wide_ptr(serial) };
     let options = unsafe { source_start_options_from_ffi(&*options) };
     let rt = crate::runtime();
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
     match rt.block_on(entry.client.source_profile_start(options)) {
         Ok(response) => {
             let (warnings, warnings_count) = wide_string_array(&response.warnings);
@@ -1495,11 +1499,11 @@ pub extern "C" fn profiler_source_profile_status(
     let serial_str = unsafe { from_wide_ptr(serial) };
     let session_id = unsafe { from_wide_ptr(session_id) };
     let rt = crate::runtime();
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
     match rt.block_on(entry.client.source_profile_status(&session_id)) {
         Ok(response) => {
             unsafe {
@@ -1559,11 +1563,11 @@ pub extern "C" fn profiler_source_profile_stop(
     let session_id = unsafe { from_wide_ptr(session_id) };
     let reason = unsafe { from_wide_ptr(reason) };
     let rt = crate::runtime();
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
     match rt.block_on(entry.client.source_profile_stop(&session_id, &reason)) {
         Ok(response) => {
             let (warnings, warnings_count) = wide_string_array(&response.warnings);
@@ -1622,11 +1626,11 @@ pub extern "C" fn profiler_pull_source_bundle(
     let remote_bundle_path = unsafe { from_wide_ptr(remote_bundle_path) };
     let local_archive_path = unsafe { from_wide_ptr(local_archive_path) };
     let rt = crate::runtime();
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
     match rt.block_on(entry.client.pull_source_bundle(
         &remote_bundle_path,
         &local_archive_path,
@@ -2066,11 +2070,11 @@ macro_rules! with_connection {
         let serial_str = unsafe { from_wide_ptr($serial) };
         let $rt = crate::runtime();
 
-        let mut conns = crate::connections().lock();
-        let $entry = match conns.get_mut(&serial_str) {
+        let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
             Some(e) => e,
             None => return ProfilerResult::DeviceNotFound,
         };
+        let $entry = &mut owned_entry;
 
         $body
     }};
@@ -2699,7 +2703,7 @@ pub extern "C" fn profiler_input_key_event(serial: *const u16, key_code: i32) ->
 // File Push
 // ---------------------------------------------------------------------------
 
-/// Push a local file to the device via gRPC client streaming.
+/// Push a local file via sync control, with adb fallback for sync-only daemons.
 #[no_mangle]
 pub extern "C" fn profiler_push_file(
     serial: *const u16,
@@ -2723,9 +2727,32 @@ pub extern "C" fn profiler_push_file(
                 }
             }) {
                 Ok(_) => return ProfilerResult::Ok,
-                Err(e) => log::warn!(
-                    "profiler_push_file: sync control failed, falling back to gRPC: {e:#}"
-                ),
+                Err(sync_error) => {
+                    // Low-overhead daemons do not expose gRPC. Retrying that
+                    // endpoint only hides the original failure with ECONNREFUSED.
+                    log::warn!("profiler_push_file: sync control failed, falling back to adb: {sync_error:#}");
+                    let serial_str = unsafe { from_wide_ptr(serial) };
+                    return match rt.block_on(adb::commands::push(
+                        &serial_str,
+                        &local_str,
+                        &remote_str,
+                    )) {
+                        Ok(()) => {
+                            if let Some(callback) = cb {
+                                let total =
+                                    std::fs::metadata(&local_str).map(|m| m.len()).unwrap_or(0);
+                                callback(total, total, user_data_val as *mut c_void);
+                            }
+                            ProfilerResult::Ok
+                        }
+                        Err(adb_error) => {
+                            crate::set_last_error(format!(
+                                "profiler_push_file failed. local='{local_str}', remote='{remote_str}', sync error={sync_error:#}; adb fallback error={adb_error:#}"
+                            ));
+                            ProfilerResult::OperationFailed
+                        }
+                    };
+                }
             }
         }
 
@@ -3734,11 +3761,11 @@ pub extern "C" fn profiler_start_cr(
     };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     let sync_request = CrStreamRequest {
         interval_secs,
@@ -3992,11 +4019,11 @@ pub extern "C" fn profiler_start_tc(
     };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     let sync_request = TcStreamRequest {
         pid,
@@ -4222,11 +4249,11 @@ pub extern "C" fn profiler_start_cml(
     };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     let sync_request = CmlStreamRequest {
         cpus: cpus_slice.to_vec(),
@@ -4546,11 +4573,11 @@ pub extern "C" fn profiler_discover_ftrace_events(
     let serial_str = unsafe { from_wide_ptr(serial) };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     if let Some(addr) = sync_control_addr(entry) {
         match grpc::sync_control::discover_ftrace_events(&addr) {
@@ -4607,11 +4634,11 @@ pub extern "C" fn profiler_discover_pmu_events(
     let serial_str = unsafe { from_wide_ptr(serial) };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     if let Some(addr) = sync_control_addr(entry) {
         match grpc::sync_control::discover_pmu_events(&addr) {
@@ -4669,11 +4696,11 @@ pub extern "C" fn profiler_get_pmu_hw_counters(
     let serial_str = unsafe { from_wide_ptr(serial) };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     if let Some(addr) = sync_control_addr(entry) {
         match grpc::sync_control::get_pmu_hw_counters(&addr) {
@@ -4726,11 +4753,11 @@ pub extern "C" fn profiler_discover_gpu_counters(
     let serial_str = unsafe { from_wide_ptr(serial) };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     if let Some(addr) = sync_control_addr(entry) {
         match grpc::sync_control::discover_gpu_counters(&addr) {
@@ -4802,11 +4829,11 @@ pub extern "C" fn profiler_start_gc(
     let ids = unsafe { std::slice::from_raw_parts(counter_ids, counter_ids_count) };
     let rt = crate::runtime();
 
-    let mut conns = crate::connections().lock();
-    let entry = match conns.get_mut(&serial_str) {
+    let mut owned_entry = match crate::connections().lock().get(&serial_str).cloned() {
         Some(e) => e,
         None => return ProfilerResult::DeviceNotFound,
     };
+    let entry = &mut owned_entry;
 
     let sync_request = GcStreamRequest {
         gpu_device_number,
