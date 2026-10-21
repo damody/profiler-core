@@ -17,6 +17,108 @@ use crate::proto::{
     SourceSpeOperationFilterMode, StopRecordingRequest, StopResponse, TcStreamRequest,
 };
 
+// Read only when the transport polls, allocating at most one 64 KiB chunk.
+fn upload_chunks<R: std::io::Read, F: Fn(u64, u64)>(
+    mut reader: R,
+    total: u64,
+    remote_path: String,
+    progress: F,
+) -> impl Iterator<Item = std::io::Result<FileUploadChunk>> {
+    let mut sent = 0;
+    let mut finished = false;
+    std::iter::from_fn(move || {
+        if finished {
+            return None;
+        }
+        let mut data = vec![0; (total - sent).min(64 * 1024) as usize];
+        if let Err(error) = reader.read_exact(&mut data) {
+            finished = true;
+            return Some(Err(error));
+        }
+        let first = sent == 0;
+        sent += data.len() as u64;
+        finished = sent == total;
+        progress(sent, total);
+        Some(Ok(FileUploadChunk {
+            remote_path: if first {
+                remote_path.clone()
+            } else {
+                String::new()
+            },
+            data,
+            is_last: finished,
+        }))
+    })
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    use std::io::{Cursor, Read};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[test]
+    fn upload_reads_only_when_polled_and_bounds_chunk_size() {
+        struct CountingReader(Arc<AtomicUsize>);
+        impl Read for CountingReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0.fetch_add(buf.len(), Ordering::SeqCst);
+                buf.fill(42);
+                Ok(buf.len())
+            }
+        }
+        let reads = Arc::new(AtomicUsize::new(0));
+        let total = 2 * 1024 * 1024 * 1024;
+        let mut chunks = upload_chunks(
+            CountingReader(reads.clone()),
+            total,
+            "/upload.apk".into(),
+            |_, _| {},
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        let first = chunks.next().unwrap().unwrap();
+        assert_eq!(first.remote_path, "/upload.apk");
+        assert_eq!(first.data.len(), 64 * 1024);
+        assert!(!first.is_last);
+        assert!(chunks.next().unwrap().unwrap().remote_path.is_empty());
+        assert_eq!(reads.load(Ordering::SeqCst), 128 * 1024);
+    }
+
+    #[test]
+    fn upload_terminates_empty_and_partial_final_chunks() {
+        for size in [0, 3, 64 * 1024, 64 * 1024 + 1] {
+            let chunks = upload_chunks(
+                Cursor::new(vec![7; size]),
+                size as u64,
+                "/file".into(),
+                |_, _| {},
+            )
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+            assert_eq!(
+                chunks.iter().map(|chunk| chunk.data.len()).sum::<usize>(),
+                size
+            );
+            assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
+            assert!(chunks.last().unwrap().is_last);
+            assert_eq!(chunks[0].remote_path, "/file");
+        }
+    }
+
+    #[test]
+    fn truncated_upload_returns_read_error() {
+        let mut chunks = upload_chunks(Cursor::new(vec![1; 3]), 5, "/file".into(), |_, _| {});
+        assert_eq!(
+            chunks.next().unwrap().unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        assert!(chunks.next().is_none());
+    }
+}
+
 /// High-level wrapper around the gRPC ProfilerServiceClient.
 #[derive(Clone)]
 pub struct ProfilerClient {
@@ -901,57 +1003,39 @@ impl ProfilerClient {
         progress_cb: F,
     ) -> Result<u64>
     where
-        F: Fn(u64, u64),
+        F: Fn(u64, u64) + Send + 'static,
     {
         let file_size = std::fs::metadata(local_path)
             .context("Failed to read local file metadata")?
             .len();
 
         let file = std::fs::File::open(local_path).context("Failed to open local file")?;
-        let mut reader = std::io::BufReader::new(file);
+        let reader = std::io::BufReader::new(file);
 
-        let remote = remote_path.to_string();
-        let mut bytes_sent: u64 = 0;
-        let mut chunks = Vec::new();
-        let chunk_size: usize = 64 * 1024; // 64KB chunks
-
-        loop {
-            let mut buf = vec![0u8; chunk_size];
-            let n =
-                std::io::Read::read(&mut reader, &mut buf).context("Failed to read local file")?;
-            if n == 0 {
-                break;
+        let read_error = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stream_error = read_error.clone();
+        let chunks = upload_chunks(reader, file_size, remote_path.to_owned(), progress_cb);
+        // Own the reader in the transport stream; no complete-file buffer.
+        let chunks = chunks.map_while(move |chunk| match chunk {
+            Ok(chunk) => Some(chunk),
+            Err(error) => {
+                *stream_error.lock().unwrap() = Some(error);
+                None
             }
-            buf.truncate(n);
-            bytes_sent += n as u64;
-            let is_last = bytes_sent >= file_size;
-
-            chunks.push(FileUploadChunk {
-                remote_path: if chunks.is_empty() {
-                    remote.clone()
-                } else {
-                    String::new()
-                },
-                data: buf,
-                is_last,
-            });
-
-            progress_cb(bytes_sent, file_size);
-
-            if is_last {
-                break;
-            }
+        });
+        let result = self.inner.push_file(tokio_stream::iter(chunks)).await;
+        if let Some(error) = read_error.lock().unwrap().take() {
+            return Err(error).context("Failed to read local file during upload");
         }
+        let resp = result.context("PushFile RPC failed")?.into_inner();
 
-        let resp = self
-            .inner
-            .push_file(tokio_stream::iter(chunks))
-            .await
-            .context("PushFile RPC failed")?
-            .into_inner();
-
-        if !resp.success {
-            anyhow::bail!("PushFile failed on server side");
+        if !resp.success || resp.bytes_written != file_size {
+            anyhow::bail!(
+                "PushFile failed: success={}, wrote {} of {} bytes",
+                resp.success,
+                resp.bytes_written,
+                file_size
+            );
         }
 
         log::info!(

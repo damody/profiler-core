@@ -456,8 +456,13 @@ where
     stream.flush()?;
     read_status(&mut stream)?;
     let response: PushFileResponse = read_message(&mut stream)?;
-    if !response.success {
-        anyhow::bail!("sync push failed after {} bytes", response.bytes_written);
+    if !response.success || response.bytes_written != total {
+        anyhow::bail!(
+            "sync push failed: success={}, wrote {} of {} bytes",
+            response.success,
+            response.bytes_written,
+            total
+        );
     }
     progress_cb(response.bytes_written, response.bytes_written);
     Ok(response.bytes_written)
