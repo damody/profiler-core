@@ -141,6 +141,29 @@ impl DaqStreamHandle {
         } else {
             constants::DAQmx_Val_RSE
         };
+        let setup_log = SetupLog::create(output_path.as_deref());
+        setup_log.line(format!(
+            "requested: terminal={} range={min_voltage}..{max_voltage} V sample_rate={sample_rate} Hz, {} configured channel(s)",
+            terminal_name(terminal_config),
+            config.channels.len()
+        ));
+        for dev in &devices {
+            setup_log.line(format!(
+                "found device {} ({}, serial {}), {} ai input(s)",
+                dev.name,
+                dev.product_type,
+                dev.serial_number,
+                dev.ai_channels.len()
+            ));
+        }
+        for ch in &config.channels {
+            if !devices.iter().any(|dev| channels_for_device(config, dev).iter().any(|c| std::ptr::eq(*c, ch))) {
+                setup_log.line(format!(
+                    "unmatched channel {} '{}': no connected device owns it",
+                    ch.physical_channel, ch.name
+                ));
+            }
+        }
 
         // Build channel list per device, create tasks, register callbacks
         let mut all_channel_metas: Vec<ChannelMeta> = Vec::new();
@@ -158,10 +181,20 @@ impl DaqStreamHandle {
         for dev in &devices {
             let dev_channels = channels_for_device(config, dev);
             if dev_channels.is_empty() {
+                setup_log.line(format!("device {}: no configured channels, skipped", dev.name));
                 continue;
             }
 
             let lib_ref: &DaqmxLib = lib;
+            let (dev_terminal, dev_min, dev_max) =
+                device_input(&dev_channels, terminal_config, min_voltage, max_voltage);
+            setup_log.line(format!(
+                "device {}: terminal={} default range={dev_min}..{dev_max} V{}, {} configured channel(s)",
+                dev.name,
+                terminal_name(dev_terminal),
+                if dev_terminal != terminal_config { " (auto: workbook uses ai8-15)" } else { "" },
+                dev_channels.len()
+            ));
 
             // Create scales
             let mut scale_names: Vec<String> = Vec::new();
@@ -203,25 +236,38 @@ impl DaqStreamHandle {
                     .next()
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(0);
-                if ch_num % 16 >= 8 && terminal_config == constants::DAQmx_Val_Diff {
+                if ch_num % 16 >= 8 && dev_terminal == constants::DAQmx_Val_Diff {
+                    setup_log.line(format!(
+                        "  skip {} '{}': negative input of a differential pair",
+                        ch.physical_channel, ch.name
+                    ));
                     continue;
                 }
 
-                let ch_min = ch.range_min.unwrap_or(min_voltage);
-                let ch_max = ch.range_max.unwrap_or(max_voltage);
+                let ch_min = ch.range_min.unwrap_or(dev_min);
+                let ch_max = ch.range_max.unwrap_or(dev_max);
                 let scaled_min = ch_min * ch.gain + ch.offset;
                 let scaled_max = ch_max * ch.gain + ch.offset;
+                setup_log.line(format!(
+                    "  add  {} '{}': gain={} offset={} range={ch_min}..{ch_max} V{} -> scaled {scaled_min}..{scaled_max}",
+                    ch.physical_channel,
+                    ch.name,
+                    ch.gain,
+                    ch.offset,
+                    if ch.range_min.is_some() || ch.range_max.is_some() { " (workbook)" } else { "" }
+                ));
 
                 task.add_ai_voltage_chan(
                     &ch.physical_channel,
                     &scale_names[idx],
-                    terminal_config,
+                    dev_terminal,
                     scaled_min,
                     scaled_max,
                     true,
                     &scale_names[idx],
                 )
                 .map_err(|e| {
+                    setup_log.line(format!("  FAILED {}: {e}", ch.physical_channel));
                     error!(
                         "DAQ: Failed to add channel '{}': {}",
                         ch.physical_channel, e
@@ -861,6 +907,71 @@ impl DaqStreamHandle {
     }
 }
 
+/// `<output>.setup.txt`: how each device and channel was configured for this recording, so a
+/// field run can show which terminal mode and range were actually applied.
+struct SetupLog(Option<String>);
+
+impl SetupLog {
+    fn create(output_path: Option<&str>) -> Self {
+        let path = output_path.map(|p| format!("{p}.setup.txt"));
+        if let Some(path) = &path {
+            if let Err(e) = std::fs::write(path, "") {
+                warn!("DAQ: setup log create {path}: {e}");
+            }
+        }
+        Self(path)
+    }
+
+    fn line(&self, line: String) {
+        use std::io::Write;
+        info!("DAQ: {line}");
+        let Some(path) = &self.0 else { return };
+        let written = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .and_then(|mut file| writeln!(file, "{line}"));
+        if let Err(e) = written {
+            warn!("DAQ: setup log write {path}: {e}");
+        }
+    }
+}
+
+fn terminal_name(terminal: i32) -> &'static str {
+    if terminal == constants::DAQmx_Val_Diff {
+        "Diff"
+    } else {
+        "RSE"
+    }
+}
+
+/// Full-scale range used for a device recorded single-ended: its inputs carry rail voltages
+/// rather than shunt drops, so a narrow differential range would clip them.
+const RSE_RANGE_V: f64 = 10.0;
+
+fn physical_input_number(physical_channel: &str) -> Option<u32> {
+    physical_channel.rsplit("ai").next()?.parse().ok()
+}
+
+/// Terminal mode and default range for one device. In differential mode ai8-15 of every
+/// block of 16 are the negative inputs of ai0-7, so a workbook that names a channel there is
+/// wired single-ended for that device; such a device is recorded as RSE over ±10 V. An
+/// explicit RSE request applies to every device unchanged.
+fn device_input(
+    channels: &[&super::config::ChannelConfig],
+    terminal_config: i32,
+    min_voltage: f64,
+    max_voltage: f64,
+) -> (i32, f64, f64) {
+    let single_ended = channels.iter().any(|ch| {
+        physical_input_number(&ch.physical_channel).is_some_and(|number| number % 16 >= 8)
+    });
+    if terminal_config == constants::DAQmx_Val_Diff && single_ended {
+        (constants::DAQmx_Val_RSE, -RSE_RANGE_V, RSE_RANGE_V)
+    } else {
+        (terminal_config, min_voltage, max_voltage)
+    }
+}
+
 fn channels_for_device<'a>(
     config: &'a DaqConfig,
     device: &DeviceInfo,
@@ -873,4 +984,39 @@ fn channels_for_device<'a>(
                 || device.ai_channels.contains(&ch.physical_channel)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod device_input_tests {
+    use super::super::config::{ChannelConfig, Rgb};
+    use super::*;
+
+    fn channel(physical: &str) -> ChannelConfig {
+        ChannelConfig {
+            physical_channel: physical.into(),
+            name: physical.into(),
+            gain: 1.0,
+            offset: 0.0,
+            order: None,
+            range_max: None,
+            range_min: None,
+            color: Rgb { r: 0, g: 0, b: 0 },
+        }
+    }
+
+    #[test]
+    fn devices_using_negative_inputs_switch_to_rse() {
+        let diff = constants::DAQmx_Val_Diff;
+        let shunts = [channel("Dev1/ai0"), channel("Dev1/ai7"), channel("Dev1/ai23")];
+        let shunts = shunts.iter().collect::<Vec<_>>();
+        assert_eq!(device_input(&shunts, diff, -1.0, 1.0), (diff, -1.0, 1.0));
+        let rails = [channel("Dev5/ai0"), channel("Dev5/ai8")];
+        let rails = rails.iter().collect::<Vec<_>>();
+        assert_eq!(
+            device_input(&rails, diff, -1.0, 1.0),
+            (constants::DAQmx_Val_RSE, -10.0, 10.0)
+        );
+        let rse = constants::DAQmx_Val_RSE;
+        assert_eq!(device_input(&shunts, rse, -2.0, 2.0), (rse, -2.0, 2.0));
+    }
 }
