@@ -149,26 +149,21 @@ pub async fn forward(serial: &str, local_port: u16, remote_port: u16) -> Result<
     let owners = OWNED.get_or_init(Default::default);
     let key = (serial.to_owned(), local_port, remote_port);
     let listing = super::adb_command().args(super::device_selector(serial)).args(["forward", "--list"]).output().await?;
+    let listing = if listing.status.success() { String::from_utf8_lossy(&listing.stdout).into_owned() } else { String::new() };
+    let rebind = match forward_plan(&listing, &key, &owners.lock().unwrap()) {
+        ForwardPlan::Reuse => return Ok(()),
+        ForwardPlan::Create { rebind } => rebind,
+    };
     let local = format!("tcp:{local_port}");
     let remote = format!("tcp:{remote_port}");
-    if listing.status.success() {
-        for line in String::from_utf8_lossy(&listing.stdout).lines() {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.len() == 3 && fields[1] == local {
-                // A transport-key's raw serial may be duplicated; don't assume ownership.
-                // --no-rebind below fails closed in that case. Existing connections are reused by the caller.
-                if fields[2] == remote && ((!serial.starts_with("transport:") && fields[0] == serial) || owners.lock().unwrap().contains(&key)) { return Ok(()); }
-            }
-        }
+    let mut args = vec!["forward"];
+    if !rebind {
+        args.push("--no-rebind");
     }
+    args.extend([local.as_str(), remote.as_str()]);
     let output = super::adb_command()
         .args(super::device_selector(serial))
-        .args([
-            "forward",
-            "--no-rebind",
-            &format!("tcp:{local_port}"),
-            &format!("tcp:{remote_port}"),
-        ])
+        .args(&args)
         .output()
         .await
         .context("Failed to execute adb forward")?;
@@ -178,8 +173,54 @@ pub async fn forward(serial: &str, local_port: u16, remote_port: u16) -> Result<
         anyhow::bail!("adb forward failed: {stderr}");
     }
 
-    owners.lock().unwrap().insert(key);
+    let mut owners = owners.lock().unwrap();
+    owners.retain(|(owner, port, _)| !(owner == serial && *port == local_port));
+    owners.insert(key);
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+enum ForwardPlan {
+    Reuse,
+    Create { rebind: bool },
+}
+
+/// What to do for `key` (serial, local, remote) given `adb forward --list`. A local port this
+/// process forwarded before may be rebound: the daemon restarts on another port after a Perfetto
+/// runtime install/restore, and `--no-rebind` would then refuse our own stale forward. Anything
+/// else keeps `--no-rebind` so another client's forward is never taken over.
+fn forward_plan(listing: &str, key: &(String, u16, u16), owned: &std::collections::HashSet<(String, u16, u16)>) -> ForwardPlan {
+    let (serial, local_port, remote_port) = key;
+    let local = format!("tcp:{local_port}");
+    let remote = format!("tcp:{remote_port}");
+    for line in listing.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() == 3 && fields[1] == local {
+            // A transport-key's raw serial may be duplicated; don't assume ownership.
+            // --no-rebind below fails closed in that case. Existing connections are reused by the caller.
+            if fields[2] == remote && ((!serial.starts_with("transport:") && fields[0] == serial) || owned.contains(key)) {
+                return ForwardPlan::Reuse;
+            }
+        }
+    }
+    let rebind = owned.iter().any(|(owner, port, _)| owner == serial && port == local_port);
+    ForwardPlan::Create { rebind }
+}
+
+#[cfg(test)]
+mod forward_tests {
+    use super::{forward_plan, ForwardPlan};
+
+    #[test]
+    fn our_own_stale_forward_is_rebound_but_others_are_not() {
+        let listing = "S tcp:50053 tcp:50051\nS tcp:50054 tcp:50052\n";
+        let key = ("S".to_owned(), 50053, 50053);
+        let ours = [("S".to_owned(), 50053, 50051)].into_iter().collect();
+        assert_eq!(forward_plan(listing, &key, &ours), ForwardPlan::Create { rebind: true });
+        assert_eq!(forward_plan(listing, &key, &Default::default()), ForwardPlan::Create { rebind: false }, "not ours");
+        let same = ("S".to_owned(), 50053, 50051);
+        assert_eq!(forward_plan(listing, &same, &Default::default()), ForwardPlan::Reuse);
+    }
 }
 
 /// Set up ADB reverse forwarding: device TCP port -> host TCP port.
