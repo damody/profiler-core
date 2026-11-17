@@ -29,6 +29,29 @@ pub fn auto_root() -> bool {
     AUTO_ROOT.load(Ordering::Acquire)
 }
 
+/// Whether the daemon counts instructions／cycles with MTK XMU (ARM AMU) instead of PMU.
+/// Passed as `APROFILER_COUNTERS=xmu|pmu` in the daemon's environment; a daemon that
+/// does not know the variable ignores it and keeps PMU.
+static COUNTERS_XMU: AtomicBool = AtomicBool::new(false);
+
+/// Selects XMU (`true`) or PMU for daemons started from now on; a running daemon with the
+/// other choice is restarted on the next connect.
+pub fn set_counters_xmu(enabled: bool) {
+    COUNTERS_XMU.store(enabled, Ordering::Release);
+}
+
+pub fn counters_xmu() -> bool {
+    COUNTERS_XMU.load(Ordering::Acquire)
+}
+
+fn counters_env() -> &'static str {
+    if counters_xmu() {
+        "APROFILER_COUNTERS=xmu"
+    } else {
+        "APROFILER_COUNTERS=pmu"
+    }
+}
+
 /// Try to obtain root privileges and set SELinux to permissive.
 ///
 /// Returns the [`RootMode`] that was achieved.
@@ -155,7 +178,7 @@ async fn start_daemon(
         .rsplit_once('/')
         .map(|(d, _)| d)
         .unwrap_or("/data/local/tmp");
-    let ld_env = format!("LD_LIBRARY_PATH={remote_dir}");
+    let ld_env = format!("LD_LIBRARY_PATH={remote_dir} {}", counters_env());
     // 低負載模式預設開啟；關閉時明確使用 legacy mode 方便回滾驗證。
     let overhead_flag = if low_overhead {
         "--low-overhead --sync-only"
@@ -322,6 +345,11 @@ pub async fn ensure_running_rooted(
     match get_daemon_uid(serial).await {
         // 自動 root 關閉時，非 root 的 daemon 也算可用，不為了 root 重啟。
         Some(uid) if uid == 0 || !auto_root() => match daemon_low_overhead_matches(serial, low_overhead).await {
+            Some(true) if daemon_counters_match(serial).await == Some(false) => {
+                log::info!("[{serial}] daemon 計數來源（PMU／XMU）已變更，重啟套用...");
+                kill_daemon(serial).await;
+                deploy_and_start(serial, local_path, remote_path, grpc_port, low_overhead).await
+            }
             Some(true) => {
                 if daemon_build_matches(serial, local_path).await == Some(false) {
                     log::info!("[{serial}] daemon 版本與目前套件不同，重新部署...");
@@ -373,6 +401,24 @@ async fn daemon_build_matches(serial: &str, local_path: &str) -> Option<bool> {
     .await
     .ok()?;
     Some(actual.contains(expected))
+}
+
+/// Whether the running daemon was started with the current [`counters_env`]
+/// (`None` when its environment cannot be read).
+async fn daemon_counters_match(serial: &str) -> Option<bool> {
+    let pid = get_daemon_pid(serial).await?;
+    let environ = commands::shell(serial, &format!("cat /proc/{pid}/environ | tr '\\0' '\\n'"))
+        .await
+        .ok()?;
+    if environ.trim().is_empty() {
+        return None;
+    }
+    // A daemon started before this setting existed has no variable: it counts with PMU.
+    let running = environ
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("APROFILER_COUNTERS="))
+        .unwrap_or("pmu");
+    Some(format!("APROFILER_COUNTERS={running}") == counters_env())
 }
 
 async fn daemon_low_overhead_matches(serial: &str, expected_low_overhead: bool) -> Option<bool> {
@@ -445,6 +491,7 @@ case "$*" in
   "-s S shell pidof realtime_profile") echo 4321;;
   "-s S shell cat /proc/4321/status") printf 'Name:\trealtime_profile\nUid:\t2000\t2000\t2000\t2000\n';;
   "-s S shell cat /proc/4321/cmdline"*) echo 'realtime_profile --daemon --grpc-port 1 --low-overhead --sync-only';;
+  "-s S shell cat /proc/4321/environ"*) printf 'PATH=/system/bin\nAPROFILER_COUNTERS=pmu\n';;
 esac
 exit 0
 "#,
@@ -467,6 +514,14 @@ exit 0
         let calls = connect();
         assert!(!calls.lines().any(|c| c == "-s S root"), "{calls}");
         assert!(!calls.contains("pkill") && !calls.contains("su -c") && !calls.contains("setenforce"), "{calls}");
+
+        // Switching the counter source restarts the daemon with the new environment.
+        super::set_counters_xmu(true);
+        let calls = connect();
+        assert!(calls.contains("pkill"), "{calls}");
+        assert!(calls.contains("APROFILER_COUNTERS=xmu"), "{calls}");
+        assert!(!calls.lines().any(|c| c == "-s S root"), "still no adb root: {calls}");
+        super::set_counters_xmu(false);
 
         super::set_auto_root(true);
         let calls = connect();
