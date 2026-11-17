@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::{sleep, Duration};
 
 use super::commands;
@@ -14,10 +15,30 @@ enum RootMode {
     None,
 }
 
+/// Whether connecting may restart adbd as root (`adb root`) and use `su`. On by default;
+/// with it off the daemon runs with whatever privileges adbd already has, so a phone
+/// kept in non-root mode stays that way.
+static AUTO_ROOT: AtomicBool = AtomicBool::new(true);
+
+/// Turns automatic `adb root` (and the `su` fallback) on or off for later connects.
+pub fn set_auto_root(enabled: bool) {
+    AUTO_ROOT.store(enabled, Ordering::Release);
+}
+
+pub fn auto_root() -> bool {
+    AUTO_ROOT.load(Ordering::Acquire)
+}
+
 /// Try to obtain root privileges and set SELinux to permissive.
 ///
 /// Returns the [`RootMode`] that was achieved.
 async fn ensure_root_and_permissive(serial: &str) -> RootMode {
+    if !auto_root() {
+        // Keep adbd as it is: no `adb root`, no `su`, no SELinux change.
+        let root = matches!(commands::is_root_shell(serial).await, Ok(true));
+        log::info!("[{serial}] auto root off; adbd root={root}");
+        return if root { RootMode::Adb } else { RootMode::None };
+    }
     // Keep an existing transport stable: restarting an already-root adbd would
     // unnecessarily invalidate its transport ID on duplicate-serial phones.
     if serial.starts_with("transport:") && matches!(commands::is_root_shell(serial).await, Ok(true))
@@ -284,7 +305,8 @@ fn daemon_su_pkill_command() -> &'static str {
     "su -c \"pkill -f '[r]ealtime_profile'\""
 }
 
-/// Ensure daemon is running as root. If a non-root daemon exists, restart it.
+/// Ensure daemon is running as root. If a non-root daemon exists, restart it
+/// (unless [`set_auto_root`] turned automatic root off).
 pub async fn ensure_running_rooted(
     serial: &str,
     local_path: &str,
@@ -298,14 +320,15 @@ pub async fn ensure_running_rooted(
     }
 
     match get_daemon_uid(serial).await {
-        Some(0) => match daemon_low_overhead_matches(serial, low_overhead).await {
+        // 自動 root 關閉時，非 root 的 daemon 也算可用，不為了 root 重啟。
+        Some(uid) if uid == 0 || !auto_root() => match daemon_low_overhead_matches(serial, low_overhead).await {
             Some(true) => {
                 if daemon_build_matches(serial, local_path).await == Some(false) {
                     log::info!("[{serial}] daemon 版本與目前套件不同，重新部署...");
                     kill_daemon(serial).await;
                     deploy_and_start(serial, local_path, remote_path, grpc_port, low_overhead).await
                 } else {
-                    log::info!("[{serial}] daemon 已為 root 且版本相符，沿用現有進程");
+                    log::info!("[{serial}] daemon uid={uid} 且版本相符，沿用現有進程");
                     Ok(())
                 }
             }
@@ -403,6 +426,56 @@ pub async fn get_grpc_port(serial: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{daemon_pkill_command, daemon_su_pkill_command};
+
+    /// A fake `adb` on PATH: a phone whose adbd runs as shell and whose realtime_profile
+    /// already runs as shell (uid 2000). Every invocation is logged.
+    #[cfg(unix)]
+    #[test]
+    fn auto_root_off_keeps_a_non_root_phone_and_its_daemon() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("profiler-core-fake-adb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls.log");
+        let script = format!(
+            r#"#!/bin/sh
+echo "$*" >> '{}'
+case "$*" in
+  "-s S shell id") echo 'uid=2000(shell) gid=2000(shell)';;
+  "-s S shell su -c id") exit 1;;
+  "-s S shell pidof realtime_profile") echo 4321;;
+  "-s S shell cat /proc/4321/status") printf 'Name:\trealtime_profile\nUid:\t2000\t2000\t2000\t2000\n';;
+  "-s S shell cat /proc/4321/cmdline"*) echo 'realtime_profile --daemon --grpc-port 1 --low-overhead --sync-only';;
+esac
+exit 0
+"#,
+            log.display()
+        );
+        let adb = dir.join("adb");
+        std::fs::write(&adb, script).unwrap();
+        std::fs::set_permissions(&adb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", dir.display()));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let connect = || {
+            let _ = std::fs::remove_file(&log);
+            rt.block_on(super::ensure_running_rooted("S", "", "/data/local/tmp/realtime_profile", 1, true))
+                .unwrap();
+            std::fs::read_to_string(&log).unwrap_or_default()
+        };
+
+        super::set_auto_root(false);
+        let calls = connect();
+        assert!(!calls.lines().any(|c| c == "-s S root"), "{calls}");
+        assert!(!calls.contains("pkill") && !calls.contains("su -c") && !calls.contains("setenforce"), "{calls}");
+
+        super::set_auto_root(true);
+        let calls = connect();
+        std::env::set_var("PATH", path);
+        let _ = std::fs::remove_dir_all(&dir);
+        // Default: the non-root daemon is restarted after `adb root`.
+        assert!(calls.lines().any(|c| c == "-s S root"), "{calls}");
+        assert!(calls.contains("pkill"), "{calls}");
+    }
 
     #[test]
     fn daemon_kill_commands_use_self_safe_process_pattern() {
